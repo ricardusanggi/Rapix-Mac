@@ -1,0 +1,10 @@
+# lingkungan Python dan cache
+.venv/
+__pycache__/
+
+# hasil build (DMG dibagikan lewat GitHub Releases)
+installer/build/
+installer/dist/
+virtualdisplay
+
+.DS_Store

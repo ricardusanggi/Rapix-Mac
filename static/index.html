@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<title>Rapix</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bezel: #000000;
+    --panel: #f2f3f5;
+    --ink: #1d2433;
+    --muted: #5d6677;
+    --signal: #2f6fde;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      color-scheme: dark;
+      --panel: #23262d;
+      --ink: #eef1f6;
+      --muted: #a3abb9;
+      --signal: #6f9cf0;
+    }
+  }
+  html, body {
+    margin: 0; height: 100%; overflow: hidden;
+    background: var(--bezel);
+    font-family: -apple-system, "Segoe UI", Roboto, sans-serif;
+    -webkit-user-select: none; user-select: none;
+    -webkit-touch-callout: none;
+  }
+  #surface { position: fixed; inset: 0; touch-action: none; }
+  #screen { position: absolute; display: block; pointer-events: none; }
+  #panel {
+    position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%);
+    width: min(360px, 86vw); padding: 28px 28px 24px;
+    background: var(--panel); color: var(--ink);
+    border-radius: 18px; text-align: left;
+  }
+  #panel h1 { margin: 0 0 6px; font-size: 1.375rem; font-weight: 650; letter-spacing: -0.01em; }
+  #panel p { margin: 0 0 20px; color: var(--muted); font-size: 0.95rem; line-height: 1.45; }
+  #status { display: flex; align-items: center; gap: 8px; font-size: 0.9rem; color: var(--muted); margin-bottom: 20px; }
+  #dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
+  #dot.on { background: var(--signal); }
+  button {
+    width: 100%; padding: 13px; border: 0; border-radius: 11px;
+    background: var(--signal); color: #fff; font: inherit; font-weight: 600; font-size: 1rem;
+  }
+  button:disabled { opacity: 0.45; }
+  button:focus-visible { outline: 3px solid var(--ink); outline-offset: 2px; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<div id="surface"><canvas id="screen"></canvas></div>
+
+<div id="panel">
+  <h1>Rapix</h1>
+  <p>Putar tablet ke posisi yang diinginkan sebelum membuka halaman ini. Ketuk untuk klik, geser untuk menyeret, tahan untuk klik kanan, dua jari untuk menggulir.</p>
+  <div id="status"><span id="dot"></span><span id="statusText">Menghubungkan ke MacBook…</span></div>
+  <button id="start" disabled>Mulai</button>
+</div>
+
+<script>
+const surface = document.getElementById('surface');
+const img = document.getElementById('screen');
+const panel = document.getElementById('panel');
+const startBtn = document.getElementById('start');
+const dot = document.getElementById('dot');
+const statusText = document.getElementById('statusText');
+
+const ctx = img.getContext('2d');
+let ws, remoteW = 16, remoteH = 9, started = false, rx = 0, shown = 0;
+
+function setStatus(text, ok) {
+  statusText.textContent = text;
+  dot.classList.toggle('on', ok);
+  startBtn.disabled = !ok;
+  if (!ok && started) panel.classList.remove('hidden');
+}
+
+function layout() {
+  const vw = innerWidth, vh = innerHeight;
+  const s = Math.min(vw / remoteW, vh / remoteH);
+  const w = remoteW * s, h = remoteH * s;
+  Object.assign(img.style, { width: w + 'px', height: h + 'px', left: (vw - w) / 2 + 'px', top: (vh - h) / 2 + 'px' });
+}
+addEventListener('resize', layout);
+
+function send(o) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(o)); }
+function ack() { send({ t: 'ack' }); }
+
+function connect() {
+  ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws?k=' + encodeURIComponent(location.pathname.split('/')[1] || ''));
+  ws.binaryType = 'arraybuffer';
+  ws.onopen = () => {
+    // kirim ukuran layar tablet supaya MacBook membuat monitor dengan ukuran yang pas
+    const landscape = innerWidth >= innerHeight;
+    const a = Math.max(screen.width, screen.height), b = Math.min(screen.width, screen.height);
+    ws.send(JSON.stringify({ t: 'screen', w: landscape ? a : b, h: landscape ? b : a, dpr: devicePixelRatio }));
+    setStatus('Terhubung', true);
+    if (started) panel.classList.add('hidden');
+  };
+  ws.onmessage = (e) => {
+    if (typeof e.data === 'string') {
+      const d = JSON.parse(e.data);
+      if (d.t === 'hello') { remoteW = d.w; remoteH = d.h; layout(); }
+      if (d.t === 'error') { started = false; panel.classList.remove('hidden'); setStatus('Gagal: ' + d.msg, false); }
+      return;
+    }
+    // decode di luar thread utama; frame yang datang terlambat dibuang
+    const n = ++rx;
+    createImageBitmap(new Blob([e.data], { type: 'image/jpeg' })).then((bmp) => {
+      if (n > shown) {
+        shown = n;
+        if (img.width !== bmp.width || img.height !== bmp.height) { img.width = bmp.width; img.height = bmp.height; }
+        ctx.drawImage(bmp, 0, 0);
+      }
+      bmp.close();
+    }).catch(() => {}).finally(ack);
+  };
+  ws.onclose = () => { setStatus('Terputus. Menyambung ulang…', false); setTimeout(connect, 1500); };
+}
+
+startBtn.addEventListener('click', () => {
+  started = true;
+  panel.classList.add('hidden');
+  const el = document.documentElement;
+  (el.requestFullscreen || el.webkitRequestFullscreen || (() => {})).call(el);
+});
+
+// ---------- sentuhan -> mouse ----------
+function norm(x, y) {
+  const r = img.getBoundingClientRect();
+  return {
+    x: Math.min(1, Math.max(0, (x - r.left) / r.width)),
+    y: Math.min(1, Math.max(0, (y - r.top) / r.height)),
+  };
+}
+
+const pts = new Map();
+let mode = null;          // 'pending' | 'drag' | 'scroll' | 'done'
+let startPt = null, lpTimer = null, scrollY0 = 0, scrollAcc = 0;
+let lastTap = { t: 0, x: 0, y: 0 }, lastMove = 0;
+
+const avgY = () => { let s = 0; pts.forEach(p => s += p.y); return s / pts.size; };
+
+surface.addEventListener('pointerdown', (e) => {
+  if (!started) return;
+  e.preventDefault();
+  surface.setPointerCapture(e.pointerId);
+  pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+  if (pts.size === 1) {
+    startPt = { x: e.clientX, y: e.clientY };
+    const p = norm(e.clientX, e.clientY);
+    send({ t: 'move', ...p });
+    if (e.pointerType !== 'touch') {            // mouse / Apple Pencil: langsung tekan
+      mode = 'drag'; send({ t: 'down', ...p });
+    } else {
+      mode = 'pending';
+      lpTimer = setTimeout(() => {
+        if (mode === 'pending') { mode = 'done'; send({ t: 'rclick', ...p }); }
+      }, 600);
+    }
+  } else if (pts.size === 2) {
+    clearTimeout(lpTimer);
+    if (mode === 'drag') send({ t: 'up', ...norm(e.clientX, e.clientY) });
+    mode = 'scroll'; scrollY0 = avgY(); scrollAcc = 0;
+  }
+});
+
+surface.addEventListener('pointermove', (e) => {
+  if (!pts.has(e.pointerId)) return;
+  e.preventDefault();
+  pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+
+  if (mode === 'scroll' && pts.size >= 2) {
+    const y = avgY(); scrollAcc += y - scrollY0; scrollY0 = y;
+    const steps = Math.trunc(scrollAcc / 12);
+    if (steps) { send({ t: 'scroll', dy: steps }); scrollAcc -= steps * 12; }
+    return;
+  }
+  if (mode === 'pending' && Math.hypot(e.clientX - startPt.x, e.clientY - startPt.y) > 8) {
+    clearTimeout(lpTimer);
+    mode = 'drag';
+    send({ t: 'down', ...norm(startPt.x, startPt.y) });
+  }
+  if (mode === 'drag') {
+    const now = performance.now();
+    if (now - lastMove > 12) { lastMove = now; send({ t: 'move', ...norm(e.clientX, e.clientY) }); }
+  }
+});
+
+function endPointer(e) {
+  if (!pts.has(e.pointerId)) return;
+  pts.delete(e.pointerId);
+  const p = norm(e.clientX, e.clientY);
+  if (mode === 'pending') {
+    clearTimeout(lpTimer);
+    const now = performance.now();
+    const isDouble = now - lastTap.t < 350 && Math.hypot(e.clientX - lastTap.x, e.clientY - lastTap.y) < 25;
+    if (isDouble) { send({ t: 'dclick', ...p }); lastTap.t = 0; }
+    else { send({ t: 'down', ...p }); send({ t: 'up', ...p }); lastTap = { t: now, x: e.clientX, y: e.clientY }; }
+  } else if (mode === 'drag') {
+    send({ t: 'move', ...p }); send({ t: 'up', ...p });
+  }
+  if (pts.size === 0) mode = null;
+  else if (mode === 'scroll' && pts.size < 2) mode = 'done';
+}
+surface.addEventListener('pointerup', endPointer);
+surface.addEventListener('pointercancel', endPointer);
+addEventListener('contextmenu', (e) => e.preventDefault());
+
+layout();
+connect();
+</script>
+</body>
+</html>

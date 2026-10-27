@@ -1,0 +1,241 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rapix</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #ffffff;
+    --panel: #f2f3f5;
+    --ink: #1d2433;
+    --muted: #5d6677;
+    --line: #dde0e6;
+    --signal: #2f6fde;
+    --warn-bg: #fff4e0;
+    --warn-ink: #7a4b00;
+    --danger: #c62f3b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16181d;
+      --panel: #23262d;
+      --ink: #eef1f6;
+      --muted: #a3abb9;
+      --line: #343842;
+      --signal: #6f9cf0;
+      --warn-bg: #3a2c12;
+      --warn-ink: #f3c879;
+      --danger: #ef6b74;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font-family: -apple-system, "Segoe UI", Roboto, sans-serif; line-height: 1.45;
+  }
+  main { max-width: 640px; margin: 0 auto; padding: 32px 16px 48px; }
+  h1 { margin: 0 0 4px; font-size: 1.5rem; font-weight: 650; letter-spacing: -0.01em; }
+  .sub { margin: 0 0 24px; color: var(--muted); }
+  section { background: var(--panel); border-radius: 14px; padding: 20px; margin-bottom: 14px; }
+  h2 { margin: 0 0 12px; font-size: 0.8rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
+  .connect { display: flex; gap: 20px; align-items: center; flex-wrap: wrap; }
+  #qr { width: 148px; height: 148px; background: #fff; border-radius: 10px; padding: 8px; flex: none; }
+  #qr svg { width: 100%; height: 100%; display: block; }
+  .addr { font-size: 1.35rem; font-weight: 650; word-break: break-all; font-variant-numeric: tabular-nums; }
+  .hint { color: var(--muted); font-size: 0.92rem; margin: 6px 0 0; }
+  .status { display: flex; align-items: center; gap: 10px; font-weight: 550; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--muted); flex: none; }
+  .dot.on { background: var(--signal); }
+  .warn { background: var(--warn-bg); color: var(--warn-ink); }
+  .warn p { margin: 0 0 12px; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; }
+  button {
+    border: 0; border-radius: 10px; padding: 10px 16px; font: inherit; font-weight: 600; cursor: pointer;
+    background: var(--signal); color: #fff;
+  }
+  button.secondary { background: transparent; color: var(--danger); border: 1.5px solid var(--danger); }
+  button:focus-visible { outline: 3px solid var(--ink); outline-offset: 2px; }
+  pre {
+    margin: 0; font: 0.8rem/1.5 ui-monospace, Menlo, Consolas, monospace; color: var(--muted);
+    white-space: pre-wrap; word-break: break-word; max-height: 220px; overflow: auto;
+  }
+  .steps { list-style: none; margin: 0 0 12px; padding: 0; }
+  .steps li { display: flex; align-items: center; gap: 10px; padding: 8px 0; flex-wrap: wrap; }
+  .steps li + li { border-top: 1px solid color-mix(in srgb, currentColor 18%, transparent); }
+  .mark { width: 22px; height: 22px; border-radius: 50%; flex: none; display: grid; place-items: center;
+          font-size: 0.8rem; font-weight: 700; border: 1.5px solid currentColor; }
+  .steps li.ok .mark { background: currentColor; }
+  .steps li.ok .mark::after { content: "✓"; color: var(--warn-bg); }
+  .steps .label { flex: 1; min-width: 180px; }
+  .steps button { padding: 7px 12px; font-size: 0.9rem; }
+  .toggle { display: flex; align-items: center; gap: 10px; cursor: pointer; }
+  .toggle input { width: 18px; height: 18px; accent-color: var(--signal); }
+  .credit { margin: 28px 0 0; color: var(--muted); font-size: 0.85rem; }
+  .seg { display: inline-flex; background: var(--bg); border: 1px solid var(--line); border-radius: 11px; padding: 3px; margin-bottom: 16px; }
+  .seg button { background: transparent; color: var(--muted); padding: 8px 18px; border-radius: 8px; font-weight: 600; }
+  .seg button[aria-pressed="true"] { background: var(--signal); color: #fff; }
+  .steps-plain { margin: 6px 0 0; padding-left: 20px; color: var(--muted); font-size: 0.92rem; }
+  .steps-plain li { margin: 3px 0; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Rapix</h1>
+  <p class="sub">Setiap piksel sampai ke tablet. Jadikan tablet sebagai layar kedua MacBook. Biarkan halaman ini terbuka atau tutup saja; aplikasi tetap berjalan.</p>
+
+  <section id="perm" class="warn hidden">
+    <h2>Persiapan pertama (sekali saja)</h2>
+    <p>macOS perlu mengizinkan Rapix menampilkan layar ke tablet dan menerima sentuhan dari tablet.</p>
+    <ol class="steps">
+      <li id="stepScreen"><span class="mark"></span>
+        <span class="label" id="screenLabel"><b>Screen Recording</b>: nyalakan Rapix</span>
+        <button data-which="screen">Buka pengaturan</button></li>
+      <li id="stepAccess"><span class="mark"></span>
+        <span class="label"><b>Accessibility</b>: nyalakan Rapix</span>
+        <button data-which="access">Buka pengaturan</button></li>
+      <li id="stepRestart"><span class="mark"></span>
+        <span class="label" id="restartLabel">Rapix memuat ulang sendiri begitu keduanya menyala</span>
+        <button id="restart">Mulai ulang sekarang</button></li>
+    </ol>
+    <p class="hint">Sakelar sudah menyala tapi masih belum tercentang? Pilih Rapix di daftar itu, hapus dengan tombol <b>−</b>, lalu tambahkan lagi dengan <b>+</b> (Applications → Rapix). Ini terjadi setelah Rapix diperbarui.</p>
+  </section>
+
+  <section>
+    <h2>Sambungkan tablet</h2>
+    <div class="seg" role="group" aria-label="Cara menyambung">
+      <button data-mode="wifi" aria-pressed="false">Wi-Fi</button>
+      <button data-mode="cable" aria-pressed="false">Kabel USB</button>
+    </div>
+    <div class="connect" id="connectBox">
+      <div id="qr" aria-label="Kode QR alamat tablet"></div>
+      <div>
+        <div class="addr" id="url">…</div>
+        <p class="hint" id="connectHint"></p>
+      </div>
+    </div>
+    <div id="cableHelp" class="hidden">
+      <p class="hint"><b>Menunggu kabel USB…</b> Alamat dan QR muncul di sini begitu tablet tersambung.</p>
+      <ol class="steps-plain">
+        <li>Colok tablet ke MacBook dengan kabel data.</li>
+        <li>Di tablet: <b>Settings → Tethering</b> (Berbagi jaringan), nyalakan <b>USB tethering</b>.</li>
+        <li>Atau, untuk Android dengan USB debugging aktif: cukup colok kabel, browser tablet terbuka sendiri.</li>
+      </ol>
+    </div>
+  </section>
+
+  <section>
+    <h2>Status</h2>
+    <div class="status"><span class="dot" id="dot"></span><span id="statusText">Memuat…</span></div>
+    <p class="hint" id="modeText"></p>
+  </section>
+
+  <section id="prefs" class="hidden">
+    <h2>Pengaturan</h2>
+    <label class="toggle"><input type="checkbox" id="login"> Buka Rapix otomatis saat Mac menyala</label>
+    <p class="hint">Rapix berjalan diam-diam di latar belakang dan baru bekerja saat tablet tersambung. Panel ini bisa dibuka lagi lewat ikon Rapix di menu bar (pojok kanan atas layar) atau dengan membuka Rapix dari Launchpad.</p>
+  </section>
+
+  <section>
+    <h2>Log</h2>
+    <pre id="log"></pre>
+  </section>
+
+  <div class="row">
+    <button class="secondary" id="quit">Berhenti</button>
+  </div>
+  <p class="credit">Rapix · dibuat oleh RAP</p>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let shownQr = null, stopped = false, restarting = false;
+
+async function refresh() {
+  if (stopped) return;
+  let s;
+  try { s = await (await fetch('/api/status', { cache: 'no-store' })).json(); }
+  catch {
+    $('statusText').textContent = restarting ? 'Memuat ulang…' : 'Rapix tidak berjalan.';
+    $('dot').classList.remove('on'); return;
+  }
+  restarting = s.restarting;
+
+  for (const b of document.querySelectorAll('[data-mode]')) b.setAttribute('aria-pressed', b.dataset.mode === s.connection);
+  const cable = s.connection === 'cable';
+  $('connectBox').classList.toggle('hidden', !s.target_url);
+  $('cableHelp').classList.toggle('hidden', !!s.target_url);
+  if (s.target_url) {
+    $('url').textContent = s.target_url;
+    if (shownQr !== s.target_url) { $('qr').innerHTML = s.qr; shownQr = s.target_url; }
+    $('connectHint').innerHTML = !cable
+      ? 'Scan QR atau ketik alamat ini di browser tablet (Wi-Fi yang sama), lalu ketuk <b>Mulai</b>.'
+      : (s.wired_urls || []).length
+        ? 'Tersambung lewat kabel USB (USB tethering). Buka alamat ini di browser tablet, lalu ketuk <b>Mulai</b>.'
+        : 'Tablet Android tersambung lewat kabel (USB debugging). Browser tablet terbuka sendiri; ketuk <b>Mulai</b>.';
+  }
+
+  $('dot').classList.toggle('on', s.clients > 0);
+  $('statusText').textContent = s.clients > 0 ? `Tablet tersambung (${s.clients})` : 'Menunggu tablet…';
+  $('modeText').textContent = !s.display ? ''
+    : s.virtual ? `Layar kedua ${s.display} aktif. Atur posisinya di System Settings → Displays → Arrange.`
+    : `Mode cermin: tablet menampilkan layar ${s.display}.`;
+
+  // bagian persiapan hanya tampil selama ada izin yang benar-benar belum aktif
+  const p = s.perms || {};
+  const lacking = p.screen === false || p.access === false;
+  $('perm').classList.toggle('hidden', !lacking && !s.restarting);
+  $('stepScreen').classList.toggle('ok', p.screen !== false);
+  $('screenLabel').innerHTML = p.screen_stale
+    ? '<b>Screen Recording</b>: sakelar menyala tapi layar masih disamarkan macOS (tablet hanya abu-abu). Hapus Rapix dengan <b>−</b>, tambahkan lagi dengan <b>+</b>, lalu klik <b>Mulai ulang sekarang</b>.'
+    : '<b>Screen Recording</b>: nyalakan Rapix';
+  $('stepAccess').classList.toggle('ok', p.access !== false);
+  $('stepScreen').querySelector('button').classList.toggle('hidden', p.screen !== false);
+  $('stepAccess').querySelector('button').classList.toggle('hidden', p.access !== false);
+  $('stepRestart').classList.toggle('hidden', !s.can_restart);
+  const ready = p.screen !== false && p.access !== false;
+  $('restartLabel').textContent = s.restarting ? 'Izin aktif. Rapix sedang dimuat ulang…'
+    : ready ? 'Izin aktif. Rapix akan dimuat ulang otomatis…'
+    : 'Rapix memuat ulang sendiri begitu keduanya menyala';
+  if (s.restarting) $('statusText').textContent = 'Memuat ulang…';
+
+  $('prefs').classList.toggle('hidden', s.login === null || s.login === undefined);
+  if (document.activeElement !== $('login')) $('login').checked = !!s.login;
+
+  $('log').textContent = (s.log || []).join('\n');
+}
+
+for (const b of document.querySelectorAll('[data-mode]')) {
+  b.addEventListener('click', async () => {
+    await fetch('/api/connection/' + b.dataset.mode, { method: 'POST' });
+    refresh();
+  });
+}
+for (const b of document.querySelectorAll('[data-which]')) {
+  b.addEventListener('click', () => fetch('/api/settings/' + b.dataset.which, { method: 'POST' }));
+}
+$('restart').addEventListener('click', async () => {
+  $('restart').disabled = true;
+  restarting = true;
+  $('statusText').textContent = 'Memulai ulang…';
+  try { await fetch('/api/restart', { method: 'POST' }); } catch {}
+  setTimeout(() => { $('restart').disabled = false; }, 6000);
+});
+$('login').addEventListener('change', (e) => {
+  fetch('/api/login/' + (e.target.checked ? 'on' : 'off'), { method: 'POST' });
+});
+$('quit').addEventListener('click', async () => {
+  if (!confirm('Hentikan Rapix? Layar tablet akan dilepas.')) return;
+  stopped = true;
+  try { await fetch('/api/quit', { method: 'POST' }); } catch {}
+  $('statusText').textContent = 'Rapix sudah berhenti. Halaman ini boleh ditutup.';
+  $('dot').classList.remove('on');
+});
+
+refresh();
+setInterval(refresh, 2000);
+</script>
+</body>
+</html>
