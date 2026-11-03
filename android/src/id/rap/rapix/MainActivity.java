@@ -50,6 +50,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     private TextView status;
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final ExecutorService sender = Executors.newSingleThreadExecutor();
+    private final Worker worker = new Worker();  // tablet ikut mengerjakan tugas dari Mac
 
     private volatile Surface surface;
     private volatile boolean active;
@@ -89,6 +90,13 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         requestRefreshRate(TARGET_HZ);
         hideSystemBars();
         logVsync();
+        worker.start();
+    }
+
+    @Override
+    protected void onDestroy() {
+        worker.stop();
+        super.onDestroy();
     }
 
     /** Catat refresh rate layar yang benar-benar berjalan (jumlah vsync per detik). */
