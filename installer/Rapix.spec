@@ -6,7 +6,7 @@ from pathlib import Path
 HERE = Path(SPECPATH)
 ROOT = HERE.parent
 IS_MAC = sys.platform == "darwin"
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 
 binaries = [(str(ROOT / "virtualdisplay"), "."), (str(ROOT / "screenstream"), ".")] if IS_MAC else []
 icon = str(HERE / "build" / ("icon.icns" if IS_MAC else "icon.ico"))
