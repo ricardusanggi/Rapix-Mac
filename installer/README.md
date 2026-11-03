@@ -1,6 +1,6 @@
 # Membuat installer Rapix (macOS)
 
-Hasil: `installer/dist/Rapix-1.4.1-mac-arm64.dmg`
+Hasil: `installer/dist/Rapix-1.4.2-mac-arm64.dmg`
 
 ## Cara build
 
@@ -35,5 +35,5 @@ ditandatangani *ad-hoc*.
 
 ## Mengganti versi
 
-Ubah `1.4.1` di dua tempat: `build_mac.sh` (`VERSION`) dan `Rapix.spec` (`VERSION`).
+Ubah `1.4.2` di dua tempat: `build_mac.sh` (`VERSION`) dan `Rapix.spec` (`VERSION`).
 Untuk aplikasi tablet, ubah juga `versionName` di `android/AndroidManifest.xml` dan naikkan `versionCode` satu angka.
