@@ -36,8 +36,9 @@
 
 static CGVirtualDisplay *gDisplay; // disimpan global supaya tidak dibebaskan
 
-// pilih mode w x h dengan kepadatan piksel yang diminta (scale 2 = Retina) bila belum aktif
-static void forceMode(CGDirectDisplayID did, unsigned int w, unsigned int h, unsigned int scale) {
+// pilih mode w x h dengan kepadatan piksel yang diminta (scale 2 = Retina) bila belum aktif;
+// refresh rate diatur Rapix sendiri (kabel/Wi-Fi), jadi di sini hanya dipakai untuk pilihan pertama
+static void forceMode(CGDirectDisplayID did, unsigned int w, unsigned int h, unsigned int scale, double hz) {
     CGDisplayModeRef cur = CGDisplayCopyDisplayMode(did);
     if (!cur) return;
     BOOL already = CGDisplayModeGetWidth(cur) == w && CGDisplayModeGetPixelWidth(cur) == w * scale;
@@ -46,15 +47,18 @@ static void forceMode(CGDirectDisplayID did, unsigned int w, unsigned int h, uns
 
     NSDictionary *opts = @{(__bridge NSString *)kCGDisplayShowDuplicateLowResolutionModes: @YES};
     CFArrayRef modes = CGDisplayCopyAllDisplayModes(did, (__bridge CFDictionaryRef)opts);
+    CGDisplayModeRef best = NULL;
     for (CFIndex i = 0; modes && i < CFArrayGetCount(modes); i++) {
         CGDisplayModeRef m = (CGDisplayModeRef)CFArrayGetValueAtIndex(modes, i);
-        if (CGDisplayModeGetWidth(m) == w && CGDisplayModeGetHeight(m) == h && CGDisplayModeGetPixelWidth(m) == w * scale) {
-            CGDisplayConfigRef cfg;
-            CGBeginDisplayConfiguration(&cfg);
-            CGConfigureDisplayWithDisplayMode(cfg, did, m, NULL);
-            CGCompleteDisplayConfiguration(cfg, kCGConfigurePermanently);
-            break;
-        }
+        if (CGDisplayModeGetWidth(m) != w || CGDisplayModeGetHeight(m) != h || CGDisplayModeGetPixelWidth(m) != w * scale)
+            continue;
+        if (!best || fabs(CGDisplayModeGetRefreshRate(m) - hz) < 1) best = m;
+    }
+    if (best) {
+        CGDisplayConfigRef cfg;
+        CGBeginDisplayConfiguration(&cfg);
+        CGConfigureDisplayWithDisplayMode(cfg, did, best, NULL);
+        CGCompleteDisplayConfiguration(cfg, kCGConfigurePermanently);
     }
     if (modes) CFRelease(modes);
 }
@@ -100,7 +104,10 @@ int main(int argc, const char *argv[]) {
 
         CGVirtualDisplaySettings *settings = [[Sett alloc] init];
         settings.hiDPI = hidpi ? 1 : 0;
-        settings.modes = @[ [[Mode alloc] initWithWidth:w height:h refreshRate:hz] ];
+        // mode refresh tinggi + 60 Hz: Rapix memilih 60 Hz saat tablet lewat Wi-Fi (hemat), tinggi saat kabel
+        settings.modes = hz != 60
+            ? @[ [[Mode alloc] initWithWidth:w height:h refreshRate:hz], [[Mode alloc] initWithWidth:w height:h refreshRate:60] ]
+            : @[ [[Mode alloc] initWithWidth:w height:h refreshRate:60] ];
         BOOL ok = [gDisplay applySettings:settings];
         if (!ok && hz != 60) {  // refresh tinggi ditolak: kembali ke 60 Hz
             fprintf(stderr, "refresh %.0f Hz ditolak, memakai 60 Hz\n", hz);
@@ -120,7 +127,7 @@ int main(int argc, const char *argv[]) {
         CGDirectDisplayID did = gDisplay.displayID;
         for (int i = 1; i <= 3; i++) {
             dispatch_after(dispatch_time(DISPATCH_TIME_NOW, i * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
-                forceMode(did, w, h, scale);
+                forceMode(did, w, h, scale, hz);
             });
         }
 

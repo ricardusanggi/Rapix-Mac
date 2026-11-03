@@ -458,9 +458,46 @@ class VideoClient:
     """Antrean frame video untuk satu tablet. Frame delta tidak boleh dibuang satu-satu (gambar rusak),
     jadi kalau tablet tertinggal antreannya dikosongkan lalu menunggu keyframe berikutnya."""
 
-    def __init__(self):
+    def __init__(self, wifi):
         self.queue = asyncio.Queue(maxsize=90)  # ~1,5 detik di 60 fps
         self.need_key = True
+        self.wifi = wifi  # lewat Wi-Fi (bukan kabel USB)
+
+
+def wanted_mode(app, extra_wifi=False):
+    """(fps, bitrate). Lewat kabel tablet ikut terisi daya: refresh tinggi dan kualitas penuh.
+    Ada tablet lewat Wi-Fi: 60 fps dan bitrate lebih rendah, karena radio Wi-Fi termasuk pemakan baterai terbesar."""
+    cfg = app["cfg"]
+    if extra_wifi or any(c.wifi for c in app["video"].values()):
+        return cfg.wifi_hz, cfg.wifi_bitrate
+    return cfg.hz, cfg.bitrate
+
+
+def set_refresh(app, hz):
+    """Ganti refresh rate layar virtual (mode 60 Hz dan refresh tinggi sudah disiapkan virtualdisplay)."""
+    import Quartz
+    did, mon = app.get("display_id"), app.get("mon")
+    if not did or not mon:
+        return
+    cur = Quartz.CGDisplayCopyDisplayMode(did)
+    if not cur or abs(Quartz.CGDisplayModeGetRefreshRate(cur) - hz) < 1:
+        return
+    opts = {Quartz.kCGDisplayShowDuplicateLowResolutionModes: True}
+    for m in Quartz.CGDisplayCopyAllDisplayModes(did, opts) or []:
+        same_size = (Quartz.CGDisplayModeGetWidth(m) == mon["width"]
+                     and Quartz.CGDisplayModeGetPixelWidth(m) == Quartz.CGDisplayModeGetPixelWidth(cur))
+        if same_size and abs(Quartz.CGDisplayModeGetRefreshRate(m) - hz) < 1:
+            err, cfg = Quartz.CGBeginDisplayConfiguration(None)
+            Quartz.CGConfigureDisplayWithDisplayMode(cfg, did, m, None)
+            Quartz.CGCompleteDisplayConfiguration(cfg, Quartz.kCGConfigurePermanently)
+            print(f"Layar kedua {hz} Hz.")
+            return
+
+
+def restart_stream_if_needed(app):
+    proc = app.get("stream_proc")
+    if proc and proc.returncode is None and app["video"] and app.get("stream_mode") != wanted_mode(app):
+        proc.terminate()  # stream_loop menjalankan ulang dengan fps/bitrate baru
 
 
 def video_available(app, info):
@@ -481,8 +518,11 @@ async def stream_loop(app):
     """Menjalankan screenstream selama ada tablet video, dan meneruskan setiap frame ke semua tablet."""
     cfg = app["cfg"]
     while app["video"]:
+        app["stream_mode"] = fps, bitrate = wanted_mode(app)
+        if IS_MAC:
+            set_refresh(app, fps)
         proc = await asyncio.create_subprocess_exec(
-            str(STREAMER), str(app["display_id"]), str(cfg.fps), str(cfg.bitrate),
+            str(STREAMER), str(app["display_id"]), str(fps), str(bitrate),
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
         app["stream_proc"] = proc
@@ -731,9 +771,12 @@ async def ws_handler(request):
 
     mon, cond = app["mon"], app["cond"]
     video = video_available(app, info)
+    wifi = peer not in ("127.0.0.1", "::1")
     print(f"Tablet terhubung: {peer}" + (" (video H.264)" if video else " (gambar JPEG)"))
+    # fps yang akan dipakai setelah tablet ini bergabung; tablet meminta refresh layar yang sama
+    fps = wanted_mode(app, extra_wifi=wifi)[0] if video else app["cfg"].fps
     await ws.send_json({"t": "hello", "w": mon["width"], "h": mon["height"], "codec": "h264" if video else "jpeg",
-                        "fps": app["cfg"].fps})
+                        "fps": fps})
     # maks 2 frame dalam perjalanan: tablet menampilkan satu sambil menerima berikutnya
     ready = asyncio.Semaphore(2)
 
@@ -745,10 +788,11 @@ async def ws_handler(request):
             pass
 
     if video:
-        client = VideoClient()
+        client = VideoClient(wifi=wifi)
         app["video"][ws] = client
         if not app.get("stream_task"):
             app["stream_task"] = asyncio.create_task(stream_loop(app))
+        restart_stream_if_needed(app)
         request_keyframe(app)
     else:
         app["clients"].add(ws)
@@ -785,6 +829,7 @@ async def ws_handler(request):
         app["video"].pop(ws, None)
         if not app["video"] and app.get("stream_proc") and app["stream_proc"].returncode is None:
             app["stream_proc"].terminate()  # tidak ada tablet video lagi: hentikan perekam
+        restart_stream_if_needed(app)  # mis. tablet Wi-Fi pindah ke kabel: kembali ke bitrate penuh
         task.cancel()
         print(f"Tablet terputus: {peer}")
     return ws
@@ -1025,9 +1070,12 @@ def main():
     p.add_argument("--monitor", type=int, help="pakai layar yang sudah ada (nomor dari --list)")
     p.add_argument("--list", action="store_true", help="tampilkan daftar layar lalu keluar")
     p.add_argument("--port", type=int, default=8765)
-    p.add_argument("--hz", type=int, default=90, help="refresh rate layar kedua (tablet mendukung 60/90/120/144)")
-    p.add_argument("--fps", type=int, help="frame per detik video (bawaan: sama dengan --hz; JPEG maks ~30)")
-    p.add_argument("--bitrate", type=int, default=20, help="bitrate video H.264 dalam Mbps")
+    # lewat kabel tablet terisi daya, jadi boleh refresh tinggi; lewat Wi-Fi 60 Hz agar hemat baterai
+    p.add_argument("--hz", type=int, default=90, help="refresh rate layar kedua lewat kabel USB (bawaan 90)")
+    p.add_argument("--wifi-hz", type=int, default=60, help="refresh rate layar kedua lewat Wi-Fi (bawaan 60)")
+    p.add_argument("--fps", type=int, help="frame per detik mode JPEG (praktis maks ~30)")
+    p.add_argument("--bitrate", type=int, default=20, help="bitrate video H.264 lewat kabel USB, dalam Mbps")
+    p.add_argument("--wifi-bitrate", type=int, default=12, help="bitrate video H.264 lewat Wi-Fi, dalam Mbps")
     p.add_argument("--jpeg", action="store_true", help="matikan video H.264, kirim gambar JPEG per frame")
     p.add_argument("--quality", type=int, default=80, help="kualitas JPEG 30-95")
     p.add_argument("--max-width", type=int, default=2800, help="lebar maksimum gambar yang dikirim")

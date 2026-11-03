@@ -47,7 +47,8 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     private static final String TAG = "Rapix";
     private static final String HOST = "127.0.0.1";
     private static final int PORT = 8765;
-    private static final int TARGET_HZ = 90;
+    // refresh awal; setelah tersambung, Mac memberi tahu fps-nya (kabel: tinggi, Wi-Fi: 60) dan layar mengikuti
+    private static final int TARGET_HZ = 60;
 
     private InputSurface surfaceView;
     private TextView status;
@@ -346,6 +347,10 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                     return;
                 }
                 int fps = d.optInt("fps", TARGET_HZ);
+                ui.post(() -> requestRefreshRate(fps));  // kabel: refresh tinggi; Wi-Fi: 60 Hz (hemat baterai)
+                Surface sf = surface;
+                if (Build.VERSION.SDK_INT >= 30 && sf != null)
+                    sf.setFrameRate(fps, Surface.FRAME_RATE_COMPATIBILITY_FIXED_SOURCE);
                 releasePlayer();
                 // ukuran sebenarnya dibaca decoder dari aliran video; ini hanya perkiraan awal (Retina 2x)
                 player = new VideoPlayer(surface, d.getInt("w") * 2, d.getInt("h") * 2, fps,
