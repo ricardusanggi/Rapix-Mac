@@ -77,24 +77,36 @@ class Log(io.TextIOBase):
         return len(s)
 
 
-def access_code():
-    # kode acak di alamat tablet supaya orang lain di Wi-Fi yang sama tidak bisa mengendalikan komputer;
-    # disimpan agar alamat (dan ikon Home Screen di tablet) tetap sama setiap kali dibuka
-    f = log_path().with_name("Rapix-kode.txt")
+def stored_secret(filename, length):
+    """Kode acak yang disimpan, jadi tetap sama setiap Rapix dibuka; hanya bisa dibaca pemilik akun."""
+    f = log_path().with_name(filename)
     try:
         code = f.read_text().strip()
-        if code.isalnum() and len(code) >= 5:
+        if code.isalnum() and len(code) >= length:
             return code
     except OSError:
         pass
     import secrets
-    code = "".join(secrets.choice("abcdefghjkmnpqrstuvwxyz23456789") for _ in range(5))
+    code = "".join(secrets.choice("abcdefghjkmnpqrstuvwxyz23456789") for _ in range(length))
     try:
         f.parent.mkdir(parents=True, exist_ok=True)
         f.write_text(code)
+        f.chmod(0o600)
     except OSError:
         pass
     return code
+
+
+def access_code():
+    # kode acak di alamat tablet supaya orang lain di Wi-Fi yang sama tidak bisa mengendalikan komputer;
+    # disimpan agar alamat (dan ikon Home Screen di tablet) tetap sama setiap kali dibuka
+    return stored_secret("Rapix-kode.txt", 5)
+
+
+def pairing_token():
+    # kunci panjang untuk aplikasi tablet lewat Wi-Fi; hanya diberikan lewat kabel USB (/api/pair),
+    # jadi tidak bisa ditebak dari jaringan seperti kode pendek
+    return stored_secret("Rapix-pairing.txt", 32)
 
 
 def settings_path():
@@ -649,8 +661,36 @@ def proximity(enter):
 
 
 # ---------- web ----------
+# kode akses pendek mudah ditebak berulang-ulang dari Wi-Fi yang sama: setelah beberapa kali salah,
+# alamat itu diblokir sebentar
+FAILS = {}  # ip -> [jumlah salah, waktu mulai]
+MAX_FAILS, FAIL_WINDOW, BLOCK_SECONDS = 8, 60, 300
+
+
+def blocked(ip):
+    n, since = FAILS.get(ip, (0, 0))
+    return n >= MAX_FAILS and time.time() - since < BLOCK_SECONDS
+
+
+def code_ok(request, given, allow_token=False):
+    """Kode benar (atau kunci pairing aplikasi tablet); tebakan salah dihitung per alamat IP."""
+    import hmac
+    app, ip = request.app, request.remote
+    if blocked(ip):
+        raise web.HTTPTooManyRequests(text="Terlalu banyak kode salah. Coba lagi dalam beberapa menit.")
+    ok = hmac.compare_digest(given, app["code"]) or (allow_token and hmac.compare_digest(given, app["token"]))
+    if ok:
+        FAILS.pop(ip, None)
+    elif given.isalnum():  # abaikan permintaan otomatis browser seperti /favicon.ico
+        n, since = FAILS.get(ip, (0, time.time()))
+        FAILS[ip] = (1, time.time()) if time.time() - since > FAIL_WINDOW else (n + 1, since)
+        if FAILS[ip][0] == MAX_FAILS:
+            print(f"Alamat {ip} diblokir {BLOCK_SECONDS // 60} menit karena kode salah berulang.")
+    return ok
+
+
 async def index(request):
-    if request.match_info["code"] != request.app["code"]:
+    if not code_ok(request, request.match_info["code"]):
         raise web.HTTPNotFound(text="Alamat salah. Pakai alamat lengkap (dengan kode) dari panel Rapix.")
     return web.FileResponse(STATIC / "index.html")
 
@@ -663,7 +703,7 @@ async def home(request):
 
 async def ws_handler(request):
     app = request.app
-    if request.query.get("k") != app["code"]:
+    if not code_ok(request, request.query.get("k", ""), allow_token=True):
         raise web.HTTPForbidden()
     ws = web.WebSocketResponse(heartbeat=20, max_msg_size=0)
     await ws.prepare(request)
@@ -762,6 +802,14 @@ def local_only(handler):
 @local_only
 async def panel(request):
     return web.FileResponse(STATIC / "panel.html")
+
+
+@local_only
+async def api_pair(request):
+    """Aplikasi tablet yang tersambung kabel USB (dianggap lokal) mengambil kunci dan alamat Wi-Fi Mac."""
+    app = request.app
+    return web.json_response({"token": app["token"], "port": app["cfg"].port,
+                              "hosts": [h for h in (local_ip(), socket.gethostname()) if h and h != "127.0.0.1"]})
 
 
 @local_only
@@ -910,7 +958,7 @@ async def usb_loop(app):
             if state == "unauthorized" and serial not in warned:
                 warned.add(serial)
                 print("Tablet USB terdeteksi: ketuk 'Allow/Izinkan' pada pertanyaan USB debugging di tablet.")
-            if state != "device":
+            if state != "device" or ":" in serial:  # "IP:port" = adb lewat Wi-Fi, bukan kabel
                 continue
             now.add(serial)
             if serial in known:
@@ -919,9 +967,15 @@ async def usb_loop(app):
             if code != 0:
                 print("Gagal menyiapkan kabel USB:", msg.strip())
                 continue
-            await adb("-s", serial, "shell", "am", "start", "-a", "android.intent.action.VIEW",
-                      "-d", app["usb_url"])
-            print(f"Tablet tersambung lewat kabel USB. Di tablet buka: {app['usb_url']}")
+            # aplikasi Rapix terpasang: buka aplikasinya (video lebih lancar); jika tidak, buka browser
+            _, installed = await adb("-s", serial, "shell", "pm", "path", "id.rap.rapix")
+            if installed.strip():
+                await adb("-s", serial, "shell", "am", "start", "-n", "id.rap.rapix/.MainActivity")
+                print("Tablet tersambung lewat kabel USB. Aplikasi Rapix dibuka di tablet.")
+            else:
+                await adb("-s", serial, "shell", "am", "start", "-a", "android.intent.action.VIEW",
+                          "-d", app["usb_url"])
+                print(f"Tablet tersambung lewat kabel USB. Di tablet buka: {app['usb_url']}")
         known = now
         app["adb_devices"] = len(now)
         await asyncio.sleep(2)
@@ -995,6 +1049,7 @@ def main():
     url = f"http://{local_ip()}:{cfg.port}/{code}"
     app = web.Application()
     app["code"] = code
+    app["token"] = pairing_token()
     app["perms_at_start"] = mac_permissions(prompt=True)
     app["cfg"] = cfg
     app["mon"] = None
@@ -1007,6 +1062,7 @@ def main():
     app.router.add_get("/ws", ws_handler)
     app.router.add_get("/panel", panel)
     app.router.add_get("/api/status", api_status)
+    app.router.add_get("/api/pair", api_pair)
     app.router.add_post("/api/settings/{which}", api_settings)
     app.router.add_post("/api/quit", api_quit)
     app.router.add_post("/api/restart", api_restart)

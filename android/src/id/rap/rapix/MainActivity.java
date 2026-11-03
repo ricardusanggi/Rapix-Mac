@@ -186,13 +186,27 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         if (p != null) p.release();
     }
 
+    /**
+     * Utamakan kabel USB (paling cepat). Saat tersambung kabel, aplikasi mengambil kunci pairing dan alamat
+     * Wi-Fi Mac lalu menyimpannya; tanpa kabel, aplikasi tersambung lewat Wi-Fi memakai kunci itu.
+     */
     private void connectLoop() {
         while (active) {
-            WebSocket s = new WebSocket();
-            ws = s;
+            WebSocket s = null;
             try {
-                String code = accessCode();
-                s.connect(HOST, PORT, "/ws?k=" + code);
+                boolean usb = pairOverUsb();
+                String token = prefs().getString("token", "");
+                if (usb) {
+                    s = open(HOST, PORT, token);
+                } else {
+                    String saved = prefs().getString("hosts", "");
+                    if (saved.isEmpty()) throw new IOException("belum dipasangkan");
+                    s = openFirst(saved.split(","), prefs().getInt("port", PORT), token);
+                }
+                ws = s;
+                link = usb ? "usb" : "wifi";
+                Log.i(TAG, "tersambung lewat " + (usb ? "kabel USB" : "Wi-Fi"));
+                if (!usb) watchForCable(s);
                 sendScreenInfo();
                 s.readLoop(new WebSocket.Listener() {
                     @Override public void onText(String text) { handleText(text); }
@@ -201,28 +215,95 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                         if (p != null) p.feed(data);
                     }
                 });
-            } catch (IOException | JSONException e) {
+            } catch (IOException e) {
                 Log.w(TAG, "koneksi: " + e.getMessage());
-                setStatus("Menunggu Rapix di MacBook…\nPastikan kabel USB tercolok dan Rapix berjalan.");
+                boolean paired = !prefs().getString("hosts", "").isEmpty();
+                String msg = String.valueOf(e.getMessage());
+                setStatus(msg.contains(" 403 ") || msg.contains(" 429 ")
+                        ? "MacBook menolak koneksi Wi-Fi.\nColok kabel USB sekali untuk memasangkan ulang."
+                        : paired ? "Menunggu Rapix di MacBook…\nLewat kabel USB atau Wi-Fi yang sama."
+                        : "Menunggu Rapix di MacBook…\nColok kabel USB sekali; setelah itu bisa lewat Wi-Fi.");
             } finally {
-                s.close();
+                link = null;
+                if (s != null) s.close();
                 releasePlayer();
             }
             try { Thread.sleep(1500); } catch (InterruptedException e) { return; }
         }
     }
 
-    /** Lewat USB tablet dianggap lokal oleh Rapix, jadi kode akses bisa dibaca dari status panel. */
-    private String accessCode() throws IOException, JSONException {
-        HttpURLConnection c = (HttpURLConnection) new URL("http://" + HOST + ":" + PORT + "/api/status").openConnection();
-        c.setConnectTimeout(3000);
-        c.setReadTimeout(3000);
+    private volatile String link;  // "usb" / "wifi" / null
+
+    private android.content.SharedPreferences prefs() {
+        return getSharedPreferences("rapix", MODE_PRIVATE);
+    }
+
+    /** Lewat USB tablet dianggap lokal oleh Rapix, jadi kunci pairing dan alamat Wi-Fi Mac bisa diambil. */
+    private boolean pairOverUsb() {
+        try {
+            JSONObject p = new JSONObject(httpGet("http://" + HOST + ":" + PORT + "/api/pair", 1500));
+            StringBuilder hosts = new StringBuilder();
+            for (int i = 0; i < p.getJSONArray("hosts").length(); i++)
+                hosts.append(i > 0 ? "," : "").append(p.getJSONArray("hosts").getString(i));
+            prefs().edit().putString("token", p.getString("token")).putString("hosts", hosts.toString())
+                    .putInt("port", p.optInt("port", PORT)).apply();
+            return true;
+        } catch (IOException | JSONException e) {
+            return false;
+        }
+    }
+
+    private static WebSocket open(String host, int port, String token) throws IOException {
+        WebSocket s = new WebSocket();
+        try {
+            s.connect(host, port, "/ws?k=" + token);
+            return s;
+        } catch (IOException e) {
+            s.close();
+            throw e;
+        }
+    }
+
+    /** Coba setiap alamat Mac yang tersimpan (IP lalu nama .local); pakai yang pertama berhasil. */
+    private static WebSocket openFirst(String[] hosts, int port, String token) throws IOException {
+        IOException last = new IOException("tidak ada alamat");
+        for (String h : hosts) {
+            try {
+                return open(h, port, token);
+            } catch (IOException e) {
+                last = e;
+            }
+        }
+        throw last;
+    }
+
+    /**
+     * Selama lewat Wi-Fi, cek kabel tiap 3 detik; begitu Rapix terjangkau lewat kabel, pindah ke kabel yang
+     * lebih cepat. Dicek lewat /api/pair (bukan sekadar port terbuka) karena terowongan adb bisa ada
+     * walau Rapix di Mac tidak berjalan.
+     */
+    private void watchForCable(WebSocket s) {
+        new Thread(() -> {
+            while (active && ws == s && "wifi".equals(link)) {
+                try { Thread.sleep(3000); } catch (InterruptedException e) { return; }
+                if ("wifi".equals(link) && ws == s && pairOverUsb()) {
+                    Log.i(TAG, "kabel USB tersambung, pindah dari Wi-Fi");
+                    s.close();
+                    return;
+                }
+            }
+        }, "rapix-cable").start();
+    }
+
+    private static String httpGet(String url, int timeout) throws IOException {
+        HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
+        c.setConnectTimeout(timeout);
+        c.setReadTimeout(timeout);
         try (InputStream in = c.getInputStream()) {
             ByteArrayOutputStream buf = new ByteArrayOutputStream();
             byte[] b = new byte[8192];
             for (int n; (n = in.read(b)) > 0; ) buf.write(b, 0, n);
-            String url = new JSONObject(buf.toString("UTF-8")).getString("usb_url");
-            return url.substring(url.lastIndexOf('/') + 1);
+            return buf.toString("UTF-8");
         } finally {
             c.disconnect();
         }
