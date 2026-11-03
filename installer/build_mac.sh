@@ -5,7 +5,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-VERSION="1.6.0"
+VERSION="1.6.1"
 ARCH="$(uname -m)"
 BUILD="installer/build"
 DIST="installer/dist"
