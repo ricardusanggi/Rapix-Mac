@@ -372,7 +372,8 @@ class Screen:
         self.frame, self.seq = None, 0
         self.sct = {}             # cache grab_frame: frame terakhir, supaya layar diam tidak dikirim ulang
         self.empty_since = None
-        self.video_failed = False # H.264 tidak bisa untuk layar ini: tabletnya memakai JPEG
+        self.video_failed_until = 0.0  # H.264 gagal: sampai waktu ini layar memakai JPEG, lalu dicoba lagi
+        self.standby_logged = 0.0      # kapan terakhir mencatat "layar Mac mati" (cukup sekali per menit)
 
     @property
     def name(self):
@@ -623,7 +624,14 @@ def restart_stream_if_needed(app, scr):
 
 def video_available(app, scr, info):
     return (IS_MAC and STREAMER.exists() and scr.display_id and info.get("h264")
-            and not app["cfg"].jpeg and not scr.video_failed)
+            and not app["cfg"].jpeg and time.time() >= scr.video_failed_until)
+
+
+def mac_display_off(scr):
+    """Layar Mac mati (standby/terkunci dengan layar padam): ScreenCaptureKit tidak bisa merekam apa pun."""
+    import Quartz
+    return bool(Quartz.CGDisplayIsAsleep(Quartz.CGMainDisplayID())
+                or (scr.display_id and Quartz.CGDisplayIsAsleep(scr.display_id)))
 
 
 def request_keyframe(scr):
@@ -677,18 +685,29 @@ async def stream_loop(app, scr):
             break  # layar ini sudah dilepas: perekamnya memang berhenti
         err = (await proc.stderr.read()).decode().strip().splitlines()
         if scr.video and code not in (0, -15):
+            reason = (err[-1] if err else "") or f"kode {code}"
+            if mac_display_off(scr) or "tidak ada" in reason or "Failed to find any displays" in reason:
+                # layar Mac mati (standby): bukan kegagalan. Tunggu sampai menyala lalu rekam lagi
+                if time.time() - scr.standby_logged > 60:
+                    print(f"Video {scr.label.lower()} menunggu: layar Mac sedang mati (standby).")
+                    scr.standby_logged = time.time()
+                waited = 0
+                while scr.video and (mac_display_off(scr) or waited < 2):
+                    await asyncio.sleep(1)
+                    waited += 1
+                fails = 0
+                continue
             fails = fails + 1 if time.time() - last_fail < 30 else 1
             last_fail = time.time()
-            reason = (err[-1] if err else "") or f"kode {code}"
             if fails < 3:  # gangguan sesaat (mis. layar sedang diatur macOS): coba lagi
                 print(f"Video {scr.label.lower()} berhenti ({reason}); mencoba lagi…")
                 await asyncio.sleep(1)
                 continue
-            # tetap gagal: hanya layar ini yang pindah ke JPEG, layar lain tetap video
-            print(f"Video H.264 {scr.label.lower()} gagal ({reason}); pindah ke mode gambar JPEG.")
-            scr.video_failed = True
+            # tetap gagal: layar ini memakai JPEG sementara (60 detik), lalu video dicoba lagi
+            print(f"Video H.264 {scr.label.lower()} gagal ({reason}); sementara memakai gambar JPEG.")
+            scr.video_failed_until = time.time() + 60
             for ws in list(scr.video):
-                await ws.close()  # tablet menyambung ulang dan otomatis memakai JPEG
+                await ws.close()  # tablet menyambung ulang dan memakai JPEG (atau menunggu, untuk aplikasi tablet)
             break
     scr.stream_proc = None
     scr.stream_task = None

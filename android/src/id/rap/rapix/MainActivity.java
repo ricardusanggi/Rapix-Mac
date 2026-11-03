@@ -220,7 +220,8 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                 releasePlayer();
                 synchronized (cableHint) { cableHint.notifyAll(); }  // pengecek kabel koneksi ini ikut berhenti
             }
-            try { Thread.sleep(1500); } catch (InterruptedException e) { return; }
+            // ditolak/menunggu Mac (standby, slot Wi-Fi penuh): coba lagi lebih jarang supaya hemat baterai
+            try { Thread.sleep(refusal != null ? 5000 : 1500); } catch (InterruptedException e) { return; }
         }
     }
 
@@ -356,7 +357,11 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                 setStatus(refusal);
             } else if (t.equals("hello")) {
                 if (!"h264".equals(d.optString("codec"))) {
-                    setStatus("Rapix di MacBook belum mengirim video H.264.\nPerbarui Rapix lalu coba lagi.");
+                    // video belum bisa dikirim (mis. layar MacBook mati/standby): tunggu lalu sambung ulang sendiri
+                    refusal = "MacBook sedang standby atau video belum siap.\nMenyambung ulang otomatis…";
+                    setStatus(refusal);
+                    WebSocket s = ws;
+                    if (s != null) s.close();
                     return;
                 }
                 int fps = d.optInt("fps", TARGET_HZ);
