@@ -36,6 +36,29 @@
 
 static CGVirtualDisplay *gDisplay; // disimpan global supaya tidak dibebaskan
 
+// pilih mode w x h dengan kepadatan piksel yang diminta (scale 2 = Retina) bila belum aktif
+static void forceMode(CGDirectDisplayID did, unsigned int w, unsigned int h, unsigned int scale) {
+    CGDisplayModeRef cur = CGDisplayCopyDisplayMode(did);
+    if (!cur) return;
+    BOOL already = CGDisplayModeGetWidth(cur) == w && CGDisplayModeGetPixelWidth(cur) == w * scale;
+    CGDisplayModeRelease(cur);
+    if (already) return;
+
+    NSDictionary *opts = @{(__bridge NSString *)kCGDisplayShowDuplicateLowResolutionModes: @YES};
+    CFArrayRef modes = CGDisplayCopyAllDisplayModes(did, (__bridge CFDictionaryRef)opts);
+    for (CFIndex i = 0; modes && i < CFArrayGetCount(modes); i++) {
+        CGDisplayModeRef m = (CGDisplayModeRef)CFArrayGetValueAtIndex(modes, i);
+        if (CGDisplayModeGetWidth(m) == w && CGDisplayModeGetHeight(m) == h && CGDisplayModeGetPixelWidth(m) == w * scale) {
+            CGDisplayConfigRef cfg;
+            CGBeginDisplayConfiguration(&cfg);
+            CGConfigureDisplayWithDisplayMode(cfg, did, m, NULL);
+            CGCompleteDisplayConfiguration(cfg, kCGConfigurePermanently);
+            break;
+        }
+    }
+    if (modes) CFRelease(modes);
+}
+
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
         if (argc < 3) {
@@ -91,6 +114,15 @@ int main(int argc, const char *argv[]) {
 
         printf("READY %u\n", gDisplay.displayID);
         fflush(stdout);
+
+        // macOS mengingat mode terakhir layar ini (mis. 1600x1052 tanpa Retina) dan bisa memakainya lagi,
+        // sehingga teks di tablet buram. Paksa mode yang diminta setelah layar benar-benar terpasang.
+        CGDirectDisplayID did = gDisplay.displayID;
+        for (int i = 1; i <= 3; i++) {
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, i * NSEC_PER_SEC), dispatch_get_main_queue(), ^{
+                forceMode(did, w, h, scale);
+            });
+        }
 
         // Tutup otomatis saat program induk (server.py) berhenti.
         dispatch_async(dispatch_get_global_queue(QOS_CLASS_UTILITY, 0), ^{

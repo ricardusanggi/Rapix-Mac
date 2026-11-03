@@ -944,41 +944,56 @@ async def adb(*args):
 
 async def usb_loop(app):
     # tablet Android yang dicolok (USB debugging aktif) membuka http://localhost:PORT,
-    # dan adb meneruskannya lewat kabel ke MacBook
-    port = app["cfg"].port
+    # dan adb meneruskannya lewat kabel ke MacBook.
+    # Tidak mengecek berulang-ulang: "adb track-devices" memberi kabar sendiri saat kabel dicolok/dicabut.
     known, warned = set(), set()
     while True:
-        _, out = await adb("devices")
-        now = set()
-        for line in out.splitlines()[1:]:
-            parts = line.split()
-            if len(parts) < 2:
-                continue
-            serial, state = parts[0], parts[1]
-            if state == "unauthorized" and serial not in warned:
-                warned.add(serial)
-                print("Tablet USB terdeteksi: ketuk 'Allow/Izinkan' pada pertanyaan USB debugging di tablet.")
-            if state != "device" or ":" in serial:  # "IP:port" = adb lewat Wi-Fi, bukan kabel
-                continue
-            now.add(serial)
-            if serial in known:
-                continue
-            code, msg = await adb("-s", serial, "reverse", f"tcp:{port}", f"tcp:{port}")
-            if code != 0:
-                print("Gagal menyiapkan kabel USB:", msg.strip())
-                continue
-            # aplikasi Rapix terpasang: buka aplikasinya (video lebih lancar); jika tidak, buka browser
-            _, installed = await adb("-s", serial, "shell", "pm", "path", "id.rap.rapix")
-            if installed.strip():
-                await adb("-s", serial, "shell", "am", "start", "-n", "id.rap.rapix/.MainActivity")
-                print("Tablet tersambung lewat kabel USB. Aplikasi Rapix dibuka di tablet.")
-            else:
-                await adb("-s", serial, "shell", "am", "start", "-a", "android.intent.action.VIEW",
-                          "-d", app["usb_url"])
-                print(f"Tablet tersambung lewat kabel USB. Di tablet buka: {app['usb_url']}")
-        known = now
-        app["adb_devices"] = len(now)
-        await asyncio.sleep(2)
+        proc = await asyncio.create_subprocess_exec(
+            "adb", "track-devices", stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL)
+        try:
+            while True:  # setiap kabar: 4 digit heksa panjang, lalu daftar "serial<TAB>status"
+                size = int(await proc.stdout.readexactly(4), 16)
+                listing = (await proc.stdout.readexactly(size)).decode(errors="replace")
+                known = await usb_devices_changed(app, listing, known, warned)
+        except (asyncio.IncompleteReadError, ValueError):
+            pass  # server adb dimulai ulang: sambungkan lagi
+        finally:
+            if proc.returncode is None:
+                proc.terminate()
+        await asyncio.sleep(1)
+
+
+async def usb_devices_changed(app, listing, known, warned):
+    port = app["cfg"].port
+    now = set()
+    for line in listing.splitlines():
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        serial, state = parts[0], parts[1]
+        if state == "unauthorized" and serial not in warned:
+            warned.add(serial)
+            print("Tablet USB terdeteksi: ketuk 'Allow/Izinkan' pada pertanyaan USB debugging di tablet.")
+        if state != "device" or ":" in serial:  # "IP:port" = adb lewat Wi-Fi, bukan kabel
+            continue
+        now.add(serial)
+        if serial in known:
+            continue
+        code, msg = await adb("-s", serial, "reverse", f"tcp:{port}", f"tcp:{port}")
+        if code != 0:
+            print("Gagal menyiapkan kabel USB:", msg.strip())
+            continue
+        # aplikasi Rapix terpasang: buka aplikasinya (video lebih lancar); jika tidak, buka browser
+        _, installed = await adb("-s", serial, "shell", "pm", "path", "id.rap.rapix")
+        if installed.strip():
+            await adb("-s", serial, "shell", "am", "start", "-n", "id.rap.rapix/.MainActivity")
+            print("Tablet tersambung lewat kabel USB. Aplikasi Rapix dibuka di tablet.")
+        else:
+            await adb("-s", serial, "shell", "am", "start", "-a", "android.intent.action.VIEW",
+                      "-d", app["usb_url"])
+            print(f"Tablet tersambung lewat kabel USB. Di tablet buka: {app['usb_url']}")
+    app["adb_devices"] = len(now)
+    return now
 
 
 async def on_startup(app):

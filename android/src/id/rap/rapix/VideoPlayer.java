@@ -3,53 +3,62 @@ package id.rap.rapix;
 import android.media.MediaCodec;
 import android.media.MediaFormat;
 import android.os.Build;
+import android.os.Handler;
+import android.os.HandlerThread;
 import android.util.Log;
 import android.view.Surface;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
 
-/** Memutar aliran H.264 Annex-B dari Rapix dengan decoder hardware langsung ke layar. */
+/**
+ * Memutar aliran H.264 Annex-B dari Rapix dengan decoder hardware langsung ke layar.
+ * Memakai mode callback: tidak ada thread yang terus bertanya ke decoder, jadi saat layar Mac diam
+ * tablet benar-benar diam (hemat baterai).
+ */
 final class VideoPlayer {
     private final MediaCodec codec;
-    private final Thread outputThread;
+    private final HandlerThread thread = new HandlerThread("rapix-decoder");
+    private final LinkedBlockingQueue<Integer> freeInputs = new LinkedBlockingQueue<>();
     private final Runnable requestKeyframe;
-    private volatile boolean running = true;
     private boolean needKey = true;
     private long pts;
 
     VideoPlayer(Surface surface, int width, int height, int fps, Runnable requestKeyframe) throws IOException {
         this.requestKeyframe = requestKeyframe;
+        thread.start();
         codec = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC);
         try {
+            setCallback();
             codec.configure(format(width, height, fps, true), surface, null, 0);
         } catch (MediaCodec.CodecException e) {  // decoder menolak petunjuk latensi rendah: pakai format dasar
             Log.w("Rapix", "format latensi rendah ditolak: " + e.getMessage());
-            codec.reset();
+            codec.reset();  // reset juga menghapus callback
+            setCallback();
             codec.configure(format(width, height, fps, false), surface, null, 0);
         }
         codec.start();
+    }
 
-        // tampilkan setiap frame begitu selesai di-decode, tanpa antre menunggu jadwal
-        outputThread = new Thread(() -> {
-            MediaCodec.BufferInfo info = new MediaCodec.BufferInfo();
-            long since = System.nanoTime();
-            int frames = 0;
-            while (running) {
-                try {
-                    int idx = codec.dequeueOutputBuffer(info, 20_000);
-                    if (idx >= 0) { codec.releaseOutputBuffer(idx, true); frames++; }
-                    long now = System.nanoTime();
-                    if (now - since >= 2_000_000_000L) {  // catatan untuk diagnosis: adb logcat -s Rapix
-                        Log.i("Rapix", "video " + (frames * 1_000_000_000L / (now - since)) + " fps");
-                        since = now; frames = 0;
-                    }
-                } catch (IllegalStateException e) {
-                    return;
-                }
+    private void setCallback() {
+        codec.setCallback(new MediaCodec.Callback() {
+            @Override public void onInputBufferAvailable(MediaCodec c, int index) {
+                freeInputs.offer(index);
             }
-        }, "rapix-render");
-        outputThread.start();
+
+            // tampilkan setiap frame begitu selesai di-decode, tanpa antre menunggu jadwal
+            @Override public void onOutputBufferAvailable(MediaCodec c, int index, MediaCodec.BufferInfo info) {
+                try { c.releaseOutputBuffer(index, true); } catch (IllegalStateException ignored) { }
+            }
+
+            @Override public void onError(MediaCodec c, MediaCodec.CodecException e) {
+                Log.w("Rapix", "decoder: " + e.getMessage());
+            }
+
+            @Override public void onOutputFormatChanged(MediaCodec c, MediaFormat f) { }
+        }, new Handler(thread.getLooper()));
     }
 
     private static MediaFormat format(int width, int height, int fps, boolean lowLatency) {
@@ -68,14 +77,14 @@ final class VideoPlayer {
         if (needKey && !key) return;
         needKey = false;
         try {
-            int idx = codec.dequeueInputBuffer(50_000);
-            if (idx < 0) { skipToKeyframe(); return; }  // decoder penuh: lewati sampai keyframe berikutnya
+            Integer idx = freeInputs.poll(50, TimeUnit.MILLISECONDS);
+            if (idx == null) { skipToKeyframe(); return; }  // decoder penuh: lewati sampai keyframe berikutnya
             ByteBuffer buf = codec.getInputBuffer(idx);
             buf.clear();
             buf.put(packet, 1, packet.length - 1);
             pts += 11_111;
             codec.queueInputBuffer(idx, 0, packet.length - 1, pts, key ? MediaCodec.BUFFER_FLAG_KEY_FRAME : 0);
-        } catch (IllegalStateException e) {
+        } catch (IllegalStateException | InterruptedException e) {
             skipToKeyframe();
         }
     }
@@ -86,9 +95,8 @@ final class VideoPlayer {
     }
 
     void release() {
-        running = false;
-        try { outputThread.join(200); } catch (InterruptedException ignored) { }
         try { codec.stop(); } catch (IllegalStateException ignored) { }
         codec.release();
+        thread.quitSafely();
     }
 }

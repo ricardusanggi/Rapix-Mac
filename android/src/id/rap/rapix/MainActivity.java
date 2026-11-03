@@ -1,6 +1,10 @@
 package id.rap.rapix;
 
 import android.app.Activity;
+import android.content.BroadcastReceiver;
+import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
 import android.graphics.Color;
 import android.os.Build;
 import android.os.Bundle;
@@ -8,7 +12,6 @@ import android.os.Handler;
 import android.os.Looper;
 import android.util.DisplayMetrics;
 import android.util.Log;
-import android.view.Choreographer;
 import android.view.Display;
 import android.view.Gravity;
 import android.view.KeyEvent;
@@ -89,31 +92,17 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
 
         requestRefreshRate(TARGET_HZ);
         hideSystemBars();
-        logVsync();
         worker.start();
+        IntentFilter f = new IntentFilter(Intent.ACTION_POWER_CONNECTED);
+        f.addAction("android.hardware.usb.action.USB_STATE");
+        registerReceiver(usbReceiver, f);
     }
 
     @Override
     protected void onDestroy() {
+        unregisterReceiver(usbReceiver);
         worker.stop();
         super.onDestroy();
-    }
-
-    /** Catat refresh rate layar yang benar-benar berjalan (jumlah vsync per detik). */
-    private void logVsync() {
-        Choreographer.getInstance().postFrameCallback(new Choreographer.FrameCallback() {
-            long since;
-            int frames;
-            @Override public void doFrame(long t) {
-                if (since == 0) since = t;
-                frames++;
-                if (t - since >= 2_000_000_000L) {
-                    Log.i(TAG, "layar " + (frames * 1_000_000_000L / (t - since)) + " Hz");
-                    since = t; frames = 0;
-                }
-                if (!isFinishing()) Choreographer.getInstance().postFrameCallback(this);
-            }
-        });
     }
 
     @Override
@@ -227,6 +216,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                 link = null;
                 if (s != null) s.close();
                 releasePlayer();
+                synchronized (cableHint) { cableHint.notifyAll(); }  // pengecek kabel koneksi ini ikut berhenti
             }
             try { Thread.sleep(1500); } catch (InterruptedException e) { return; }
         }
@@ -278,14 +268,22 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     }
 
     /**
-     * Selama lewat Wi-Fi, cek kabel tiap 3 detik; begitu Rapix terjangkau lewat kabel, pindah ke kabel yang
-     * lebih cepat. Dicek lewat /api/pair (bukan sekadar port terbuka) karena terowongan adb bisa ada
-     * walau Rapix di Mac tidak berjalan.
+     * Selama lewat Wi-Fi, begitu kabel dicolok dan Rapix terjangkau lewat kabel, pindah ke kabel yang lebih
+     * cepat. Dicek lewat /api/pair (bukan sekadar port terbuka) karena terowongan adb bisa ada walau Rapix
+     * di Mac tidak berjalan.
      */
     private void watchForCable(WebSocket s) {
         new Thread(() -> {
+            long checkUntil = 0;
             while (active && ws == s && "wifi".equals(link)) {
-                try { Thread.sleep(3000); } catch (InterruptedException e) { return; }
+                // hemat baterai: tidak mengecek apa pun sampai sistem memberi tahu kabel dicolok; setelah itu
+                // cek tiap 0,3 detik selama 15 detik (waktu Mac menyiapkan terowongan USB), lalu tidur lagi
+                synchronized (cableHint) {
+                    long now = System.currentTimeMillis();
+                    try { cableHint.wait(now < checkUntil ? 300 : 0); } catch (InterruptedException e) { return; }
+                    if (cablePlugged) { cablePlugged = false; checkUntil = System.currentTimeMillis() + 15_000; }
+                }
+                if (System.currentTimeMillis() >= checkUntil) continue;
                 if ("wifi".equals(link) && ws == s && pairOverUsb()) {
                     Log.i(TAG, "kabel USB tersambung, pindah dari Wi-Fi");
                     s.close();
@@ -294,6 +292,21 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
             }
         }, "rapix-cable").start();
     }
+
+    private final Object cableHint = new Object();
+    private boolean cablePlugged;
+
+    /** Sinyal sistem saat kabel USB dicolok (data atau daya): bangunkan pengecek kabel. */
+    private final BroadcastReceiver usbReceiver = new BroadcastReceiver() {
+        @Override public void onReceive(Context ctx, Intent i) {
+            boolean usbData = "android.hardware.usb.action.USB_STATE".equals(i.getAction())
+                    && i.getBooleanExtra("connected", false);
+            if (usbData || Intent.ACTION_POWER_CONNECTED.equals(i.getAction())) {
+                Log.i(TAG, "kabel dicolok");
+                synchronized (cableHint) { cablePlugged = true; cableHint.notifyAll(); }
+            }
+        }
+    };
 
     private static String httpGet(String url, int timeout) throws IOException {
         HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
