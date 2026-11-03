@@ -467,11 +467,17 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         return false;
     }
 
-    // ---------- sentuhan -> mouse (sama seperti halaman browser) ----------
-    private static final int PENDING = 1, DRAG = 2, SCROLL = 3, DONE = 4;
+    // ---------- sentuhan -> mouse & trackpad ----------
+    // satu jari: ketuk = klik, ketuk dua kali = klik ganda, tahan = klik kanan, geser = seret
+    // dua jari: geser = gulir halus (dengan momentum), cubit = zoom, ketuk = klik kanan
+    // tiga jari: geser = Spaces / Mission Control / App Exposé, ketuk = keyboard layar
+    private static final int PENDING = 1, DRAG = 2, TWO = 3, SCROLL = 4, PINCH = 5, THREE = 6, DONE = 7;
     private int mode;
-    private float startX, startY, scrollY0, scrollAcc, lastTapX, lastTapY;
+    private float startX, startY, lastTapX, lastTapY;
     private long lastTapT, lastMoveT;
+    private float cx0, cy0, lcx, lcy, span0, lastSpan, velX, velY;
+    private long multiT0, lastScrollT;
+    private boolean swiped;
     private final Runnable longPress = () -> {
         if (mode == PENDING) { mode = DONE; sendPoint("rclick", startX, startY); }
     };
@@ -482,25 +488,111 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         send("{\"t\":\"" + type + "\",\"x\":" + nx + ",\"y\":" + ny + "}");
     }
 
-    private float avgY(MotionEvent e) {
-        float s = 0;
-        for (int i = 0; i < e.getPointerCount(); i++) s += e.getY(i);
-        return s / e.getPointerCount();
+    /** Titik tengah semua jari yang masih menempel (jari yang sedang diangkat tidak dihitung). */
+    private float[] centroid(MotionEvent e) {
+        float sx = 0, sy = 0;
+        int n = 0, up = e.getActionMasked() == MotionEvent.ACTION_POINTER_UP ? e.getActionIndex() : -1;
+        for (int i = 0; i < e.getPointerCount(); i++) {
+            if (i == up) continue;
+            sx += e.getX(i); sy += e.getY(i); n++;
+        }
+        return new float[]{sx / Math.max(n, 1), sy / Math.max(n, 1)};
+    }
+
+    private static float span(MotionEvent e) {
+        return (float) Math.hypot(e.getX(0) - e.getX(1), e.getY(0) - e.getY(1));
+    }
+
+    private void sendScroll(String phase, float dx, float dy) {
+        send(json("t", "scroll2", "ph", phase, "dx", dx / surfaceView.getWidth(), "dy", dy / surfaceView.getHeight(),
+                "vx", phase.equals("end") ? velX : 0, "vy", phase.equals("end") ? velY : 0));
+    }
+
+    /** Dua jari atau lebih: bedakan gulir, cubit, ketuk, dan geser tiga jari. */
+    private void onMultiTouch(MotionEvent e) {
+        long now = System.currentTimeMillis();
+        float[] c = centroid(e);
+        int fingers = e.getPointerCount();
+        switch (e.getActionMasked()) {
+            case MotionEvent.ACTION_POINTER_DOWN:
+                ui.removeCallbacks(longPress);
+                if (mode == DRAG) sendPoint("up", lcx, lcy);
+                if (fingers == 2 && mode != THREE) {
+                    mode = TWO; multiT0 = now; span0 = lastSpan = span(e);
+                } else if (fingers >= 3 && mode != THREE) {
+                    mode = THREE; swiped = false;
+                    if (now - multiT0 > 400) multiT0 = now;
+                }
+                cx0 = lcx = c[0]; cy0 = lcy = c[1];
+                break;
+            case MotionEvent.ACTION_MOVE:
+                float moved = (float) Math.hypot(c[0] - cx0, c[1] - cy0);
+                if (mode == TWO) {
+                    float pinch = Math.abs(span(e) - span0);
+                    if (pinch > 30 * density && pinch > moved) {
+                        mode = PINCH; lastSpan = span(e);
+                    } else if (moved > 10 * density) {
+                        mode = SCROLL; velX = velY = 0; lastScrollT = now;
+                        sendScroll("begin", c[0] - lcx, c[1] - lcy);
+                        lcx = c[0]; lcy = c[1];
+                    }
+                } else if (mode == SCROLL) {
+                    float dx = c[0] - lcx, dy = c[1] - lcy;
+                    long dt = Math.max(1, now - lastScrollT);
+                    // kecepatan (relatif layar per detik), dihaluskan, untuk momentum saat jari diangkat
+                    velX = 0.7f * velX + 0.3f * (dx / surfaceView.getWidth()) * 1000f / dt;
+                    velY = 0.7f * velY + 0.3f * (dy / surfaceView.getHeight()) * 1000f / dt;
+                    lastScrollT = now;
+                    if (dx != 0 || dy != 0) sendScroll("move", dx, dy);
+                    lcx = c[0]; lcy = c[1];
+                } else if (mode == PINCH && fingers >= 2) {
+                    float ratio = span(e) / lastSpan;
+                    if (ratio > 1.12f || ratio < 1 / 1.12f) {
+                        send(json("t", "zoom", "steps", ratio > 1 ? 1 : -1));
+                        lastSpan = span(e);
+                    }
+                } else if (mode == THREE && !swiped && moved > 60 * density) {
+                    float dx = c[0] - cx0, dy = c[1] - cy0;
+                    String dir = Math.abs(dx) > Math.abs(dy) ? (dx < 0 ? "left" : "right") : (dy < 0 ? "up" : "down");
+                    send(json("t", "swipe", "dir", dir));
+                    swiped = true;
+                }
+                break;
+            case MotionEvent.ACTION_POINTER_UP:
+                int left = fingers - 1;
+                if (mode == SCROLL && left < 2) {
+                    if (now - lastScrollT > 80) velX = velY = 0;  // jari berhenti sebelum diangkat: tanpa momentum
+                    sendScroll("end", 0, 0);
+                    mode = DONE;
+                } else if (mode == TWO && left < 2) {
+                    if (now - multiT0 < 300) sendPoint("rclick", c[0], c[1]);  // ketuk dua jari = klik kanan
+                    mode = DONE;
+                } else if (mode == PINCH && left < 2) {
+                    mode = DONE;
+                } else if (mode == THREE && left < 3) {
+                    float moved3 = (float) Math.hypot(c[0] - cx0, c[1] - cy0);
+                    if (!swiped && now - multiT0 < 400 && moved3 < 20 * density) toggleSoftKeyboard();
+                    mode = DONE;
+                }
+                break;
+        }
     }
 
     private void onTouch(MotionEvent e) {
         if (isPen(e)) { onPen(e); return; }
         float x = e.getX(), y = e.getY();
         boolean finger = e.getToolType(0) == MotionEvent.TOOL_TYPE_FINGER;
-        if (e.getActionMasked() == MotionEvent.ACTION_POINTER_DOWN && e.getPointerCount() == 3) {
-            ui.removeCallbacks(longPress);
-            mode = DONE;  // ketukan tiga jari bukan klik/gulir
-            toggleSoftKeyboard();
+        int action = e.getActionMasked();
+        if (action == MotionEvent.ACTION_POINTER_DOWN || action == MotionEvent.ACTION_POINTER_UP
+                || (action == MotionEvent.ACTION_MOVE && e.getPointerCount() >= 2)
+                || (action == MotionEvent.ACTION_MOVE && mode >= TWO)) {
+            onMultiTouch(e);
             return;
         }
-        switch (e.getActionMasked()) {
+        switch (action) {
             case MotionEvent.ACTION_DOWN:
-                startX = x; startY = y;
+                send(json("t", "scroll_stop"));  // jari menyentuh: hentikan gulir momentum, seperti trackpad
+                startX = lcx = x; startY = lcy = y;
                 sendPoint("move", x, y);
                 if (!finger) {  // stylus / mouse: langsung tekan
                     mode = DRAG; sendPoint("down", x, y);
@@ -509,22 +601,8 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                     ui.postDelayed(longPress, 600);
                 }
                 break;
-            case MotionEvent.ACTION_POINTER_DOWN:
-                if (e.getPointerCount() == 2) {
-                    ui.removeCallbacks(longPress);
-                    if (mode == DRAG) sendPoint("up", x, y);
-                    mode = SCROLL; scrollY0 = avgY(e); scrollAcc = 0;
-                }
-                break;
             case MotionEvent.ACTION_MOVE:
-                if (mode == SCROLL && e.getPointerCount() >= 2) {
-                    float ay = avgY(e);
-                    scrollAcc += ay - scrollY0; scrollY0 = ay;
-                    float step = 12 * density;
-                    int steps = (int) (scrollAcc / step);
-                    if (steps != 0) { send("{\"t\":\"scroll\",\"dy\":" + steps + "}"); scrollAcc -= steps * step; }
-                    break;
-                }
+                lcx = x; lcy = y;
                 if (mode == PENDING && Math.hypot(x - startX, y - startY) > 8 * density) {
                     ui.removeCallbacks(longPress);
                     mode = DRAG;
@@ -550,9 +628,6 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                     sendPoint("move", x, y); sendPoint("up", x, y);
                 }
                 mode = 0;
-                break;
-            case MotionEvent.ACTION_POINTER_UP:
-                if (mode == SCROLL && e.getPointerCount() - 1 < 2) mode = DONE;
                 break;
         }
     }
