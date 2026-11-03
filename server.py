@@ -19,6 +19,7 @@ import sys
 import time
 import warnings
 import webbrowser
+import zlib
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -181,30 +182,38 @@ _blocked_cache = {"t": 0.0, "v": None}
 def capture_blocked(Quartz):
     """True jika tangkapan jendela aplikasi lain hanya berisi satu warna polos: tanda macOS menyamarkan
     layar karena izin Screen Recording tidak berlaku. None jika tidak bisa dipastikan (tak ada jendela)."""
-    if time.time() - _blocked_cache["t"] < 5:
+    # izin sudah terbukti berlaku: cukup dicek ulang sesekali (panel menanyakan status tiap 2 detik)
+    ttl = 60 if _blocked_cache["v"] is False else 5
+    if time.time() - _blocked_cache["t"] < ttl:
         return _blocked_cache["v"]
+    import objc
     result = None
-    opts = Quartz.kCGWindowListOptionOnScreenOnly | Quartz.kCGWindowListExcludeDesktopElements
-    windows = Quartz.CGWindowListCopyWindowInfo(opts, Quartz.kCGNullWindowID) or []
-    checked = 0
-    for w in windows:
-        b = w.get("kCGWindowBounds") or {}
-        if (w.get("kCGWindowLayer") != 0 or w.get("kCGWindowOwnerPID") == os.getpid()
-                or b.get("Width", 0) < 200 or b.get("Height", 0) < 150 or not w.get("kCGWindowAlpha")):
-            continue
-        img = Quartz.CGWindowListCreateImage(
-            Quartz.CGRectNull, Quartz.kCGWindowListOptionIncludingWindow, w["kCGWindowNumber"],
-            Quartz.kCGWindowImageBoundsIgnoreFraming | Quartz.kCGWindowImageNominalResolution)
-        checked += 1
-        if img is not None:
-            raw = bytes(Quartz.CGDataProviderCopyData(Quartz.CGImageGetDataProvider(img)))
-            step = max(4, (len(raw) // 3000) // 4 * 4)
-            if len({raw[i:i + 3] for i in range(0, len(raw) - 3, step)}) > 6:
-                result = False  # ada isi sungguhan: izin berlaku
+    # autorelease pool: gambar yang ditangkap di thread latar langsung dibebaskan, tidak menumpuk di memori
+    with objc.autorelease_pool():
+        opts = Quartz.kCGWindowListOptionOnScreenOnly | Quartz.kCGWindowListExcludeDesktopElements
+        windows = Quartz.CGWindowListCopyWindowInfo(opts, Quartz.kCGNullWindowID) or []
+        checked = 0
+        for w in windows:
+            b = w.get("kCGWindowBounds") or {}
+            if (w.get("kCGWindowLayer") != 0 or w.get("kCGWindowOwnerPID") == os.getpid()
+                    or b.get("Width", 0) < 200 or b.get("Height", 0) < 150 or not w.get("kCGWindowAlpha")):
+                continue
+            # cukup potongan kecil di tengah jendela, bukan seluruh jendela (bisa belasan MB per jendela Retina)
+            pw, ph = min(300, b["Width"]), min(200, b["Height"])
+            rect = Quartz.CGRectMake(b["X"] + (b["Width"] - pw) / 2, b["Y"] + (b["Height"] - ph) / 2, pw, ph)
+            img = Quartz.CGWindowListCreateImage(
+                rect, Quartz.kCGWindowListOptionIncludingWindow, w["kCGWindowNumber"],
+                Quartz.kCGWindowImageBoundsIgnoreFraming | Quartz.kCGWindowImageNominalResolution)
+            checked += 1
+            if img is not None:
+                raw = bytes(Quartz.CGDataProviderCopyData(Quartz.CGImageGetDataProvider(img)))
+                step = max(4, (len(raw) // 3000) // 4 * 4)
+                if len({raw[i:i + 3] for i in range(0, len(raw) - 3, step)}) > 6:
+                    result = False  # ada isi sungguhan: izin berlaku
+                    break
+            result = True
+            if checked >= 3:
                 break
-        result = True
-        if checked >= 3:
-            break
     _blocked_cache.update(t=time.time(), v=result)
     return result
 
@@ -505,13 +514,15 @@ def grab_frame(mon, max_width, quality, cache):
     shot = _sct["s"].grab(mon)
     cx, cy = pyautogui.position()
 
-    # layar tidak berubah -> tidak perlu encode dan kirim ulang
-    raw = shot.bgra
-    if raw == cache.get("raw") and (cx, cy) == cache.get("cur"):
+    # layar tidak berubah -> tidak perlu encode dan kirim ulang. Dibandingkan lewat checksum langsung dari
+    # buffer mss (tanpa salinan): menyimpan & membandingkan salinan frame Retina (~16 MB) per layar boros memori
+    raw = shot.raw
+    crc = zlib.crc32(raw)
+    if crc == cache.get("crc") and (cx, cy) == cache.get("cur"):
         return None
-    cache["raw"], cache["cur"] = raw, (cx, cy)
+    cache["crc"], cache["cur"] = crc, (cx, cy)
 
-    img = Image.frombytes("RGB", shot.size, raw, "raw", "BGRX")
+    img = Image.frombuffer("RGB", shot.size, raw, "raw", "BGRX", 0, 1)
 
     # mss tidak merekam kursor di macOS, jadi kursor digambar sendiri
     sx, sy = shot.size[0] / mon["width"], shot.size[1] / mon["height"]
@@ -568,7 +579,9 @@ class VideoClient:
     jadi kalau tablet tertinggal antreannya dikosongkan lalu menunggu keyframe berikutnya."""
 
     def __init__(self, wifi):
-        self.queue = asyncio.Queue(maxsize=90)  # ~1,5 detik di 60 fps
+        # ~0,5 detik: lebih dari itu tablet tertinggal jauh; lebih baik loncat ke keyframe baru daripada
+        # menumpuk video lama di memori (terasa saat banyak layar atau Wi-Fi lambat)
+        self.queue = asyncio.Queue(maxsize=30)
         self.need_key = True
         self.wifi = wifi  # lewat Wi-Fi (bukan kabel USB)
 

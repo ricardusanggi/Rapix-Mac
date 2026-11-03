@@ -182,7 +182,7 @@ int main(int argc, const char *argv[]) {
             cfg.minimumFrameInterval = CMTimeMake(1, fps);
             cfg.pixelFormat = kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange;  // format asli encoder, tanpa konversi
             cfg.showsCursor = YES;
-            cfg.queueDepth = 5;
+            cfg.queueDepth = 3;  // minimum yang dianjurkan; tiap buffer frame Retina ~6 MB, dikali jumlah layar
 
             gOutput = [[Output alloc] init];
             gStream = [[SCStream alloc] initWithFilter:filter configuration:cfg delegate:gOutput];
