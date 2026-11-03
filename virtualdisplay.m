@@ -2,7 +2,7 @@
 // Memakai API CGVirtualDisplay bawaan macOS (sama seperti yang dipakai BetterDisplay & Chromium).
 // Layar virtual hidup selama program ini berjalan; begitu ditutup, layarnya hilang.
 //
-// Pemakaian: ./virtualdisplay LEBAR TINGGI [hidpi 0/1]
+// Pemakaian: ./virtualdisplay LEBAR TINGGI [hidpi 0/1] [refresh Hz, bawaan 60]
 
 #import <Foundation/Foundation.h>
 #import <CoreGraphics/CoreGraphics.h>
@@ -45,6 +45,7 @@ int main(int argc, const char *argv[]) {
         unsigned int w = (unsigned int)atoi(argv[1]);
         unsigned int h = (unsigned int)atoi(argv[2]);
         BOOL hidpi = argc > 3 && atoi(argv[3]) != 0;
+        double hz = argc > 4 ? atof(argv[4]) : 60;
         unsigned int scale = hidpi ? 2 : 1;
 
         Class Desc = NSClassFromString(@"CGVirtualDisplayDescriptor");
@@ -76,8 +77,14 @@ int main(int argc, const char *argv[]) {
 
         CGVirtualDisplaySettings *settings = [[Sett alloc] init];
         settings.hiDPI = hidpi ? 1 : 0;
-        settings.modes = @[ [[Mode alloc] initWithWidth:w height:h refreshRate:60] ];
-        if (![gDisplay applySettings:settings]) {
+        settings.modes = @[ [[Mode alloc] initWithWidth:w height:h refreshRate:hz] ];
+        BOOL ok = [gDisplay applySettings:settings];
+        if (!ok && hz != 60) {  // refresh tinggi ditolak: kembali ke 60 Hz
+            fprintf(stderr, "refresh %.0f Hz ditolak, memakai 60 Hz\n", hz);
+            settings.modes = @[ [[Mode alloc] initWithWidth:w height:h refreshRate:60] ];
+            ok = [gDisplay applySettings:settings];
+        }
+        if (!ok) {
             fprintf(stderr, "gagal menerapkan resolusi %ux%u\n", w, h);
             return 4;
         }

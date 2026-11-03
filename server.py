@@ -328,7 +328,7 @@ def print_qr(url):
 async def create_virtual_display(app, w, h, hidpi):
     before = {mon_key(m) for m in monitors()}
     proc = await asyncio.create_subprocess_exec(
-        str(HELPER), str(w), str(h), "1" if hidpi else "0",
+        str(HELPER), str(w), str(h), "1" if hidpi else "0", str(app["cfg"].hz),
         stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
     )
     try:
@@ -588,7 +588,8 @@ async def ws_handler(request):
     mon, cond = app["mon"], app["cond"]
     video = video_available(app, info)
     print(f"Tablet terhubung: {peer}" + (" (video H.264)" if video else " (gambar JPEG)"))
-    await ws.send_json({"t": "hello", "w": mon["width"], "h": mon["height"], "codec": "h264" if video else "jpeg"})
+    await ws.send_json({"t": "hello", "w": mon["width"], "h": mon["height"], "codec": "h264" if video else "jpeg",
+                        "fps": app["cfg"].fps})
     # maks 2 frame dalam perjalanan: tablet menampilkan satu sambil menerima berikutnya
     ready = asyncio.Semaphore(2)
 
@@ -629,6 +630,10 @@ async def ws_handler(request):
             if d.get("t") == "ack":
                 if ready._value < 2:
                     ready.release()
+            elif d.get("t") == "key":  # decoder tablet tertinggal: minta keyframe baru
+                if video:
+                    client.need_key = True
+                    request_keyframe(app)
             elif d.get("t") != "screen":
                 await loop.run_in_executor(app["input_pool"], handle_input, app["mon"], d)
     finally:
@@ -847,7 +852,8 @@ def main():
     p.add_argument("--monitor", type=int, help="pakai layar yang sudah ada (nomor dari --list)")
     p.add_argument("--list", action="store_true", help="tampilkan daftar layar lalu keluar")
     p.add_argument("--port", type=int, default=8765)
-    p.add_argument("--fps", type=int, default=60, help="frame per detik (mode JPEG praktis maks ~30)")
+    p.add_argument("--hz", type=int, default=90, help="refresh rate layar kedua (tablet mendukung 60/90/120/144)")
+    p.add_argument("--fps", type=int, help="frame per detik video (bawaan: sama dengan --hz; JPEG maks ~30)")
     p.add_argument("--bitrate", type=int, default=20, help="bitrate video H.264 dalam Mbps")
     p.add_argument("--jpeg", action="store_true", help="matikan video H.264, kirim gambar JPEG per frame")
     p.add_argument("--quality", type=int, default=80, help="kualitas JPEG 30-95")
@@ -857,6 +863,7 @@ def main():
     p.add_argument("--no-install", action="store_true", help=argparse.SUPPRESS)
     p.add_argument("--restarted", action="store_true", help=argparse.SUPPRESS)
     cfg = p.parse_args()
+    cfg.fps = cfg.fps or cfg.hz
     panel_url = f"http://localhost:{cfg.port}/panel"
 
     if not cfg.no_install and install_to_applications(cfg.port):
