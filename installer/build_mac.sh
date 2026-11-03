@@ -27,6 +27,11 @@ echo "==> Compile pembuat layar virtual"
 clang -fobjc-arc -mmacosx-version-min=11.0 -framework Foundation -framework CoreGraphics \
   -o virtualdisplay virtualdisplay.m
 
+echo "==> Compile perekam video H.264"
+clang -fobjc-arc -mmacosx-version-min=12.3 -framework Foundation -framework CoreGraphics -framework CoreMedia \
+  -framework CoreVideo -framework ScreenCaptureKit -framework VideoToolbox \
+  -o screenstream screenstream.m
+
 echo "==> Membuat ikon"
 "$PY" installer/make_icon.py
 

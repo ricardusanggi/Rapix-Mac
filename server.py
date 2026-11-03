@@ -35,8 +35,15 @@ IS_MAC = platform.system() == "Darwin"
 IS_WIN = platform.system() == "Windows"
 FROZEN = getattr(sys, "frozen", False)  # True saat berjalan sebagai aplikasi hasil installer
 BUNDLE = Path(getattr(sys, "_MEIPASS", Path(__file__).parent))
+
+if IS_MAC:
+    # mss bawaannya merekam di resolusi nominal (Retina 2x jadi 1x) sehingga teks buram di tablet;
+    # tanpa flag NominalResolution layar Retina terekam penuh
+    import mss.darwin
+    mss.darwin.IMAGE_OPTIONS = mss.darwin.kCGWindowImageBoundsIgnoreFraming | mss.darwin.kCGWindowImageShouldBeOpaque
 STATIC = BUNDLE / "static"
 HELPER = BUNDLE / "virtualdisplay"
+STREAMER = BUNDLE / "screenstream"  # perekam layar -> video H.264 (ScreenCaptureKit + VideoToolbox)
 STATE = {"frame": None, "seq": 0}
 
 # aplikasi yang dibuka dari Finder/Start Menu tidak mewarisi PATH terminal; tambahkan lokasi umum adb
@@ -412,9 +419,11 @@ async def capture_loop(app):
     cfg, cond = app["cfg"], app["cond"]
     loop = asyncio.get_running_loop()
     pool = ThreadPoolExecutor(max_workers=1)
-    interval = 1.0 / cfg.fps
+    interval = 1.0 / min(cfg.fps, 30)  # JPEG Retina per frame tidak sanggup lebih dari ~30 fps
     while True:
         t0 = time.perf_counter()
+        if app["video"] and app["mon"]:
+            refresh_monitor(app)  # tablet video tetap butuh posisi layar terbaru untuk sentuhan
         if app["clients"] and app["mon"]:
             try:
                 refresh_monitor(app)
@@ -430,6 +439,76 @@ async def capture_loop(app):
                 print("Gagal menangkap layar (cek izin Screen Recording):", e)
                 await asyncio.sleep(2)
         await asyncio.sleep(max(0.0, interval - (time.perf_counter() - t0)))
+
+
+# ---------- video H.264 ----------
+class VideoClient:
+    """Antrean frame video untuk satu tablet. Frame delta tidak boleh dibuang satu-satu (gambar rusak),
+    jadi kalau tablet tertinggal antreannya dikosongkan lalu menunggu keyframe berikutnya."""
+
+    def __init__(self):
+        self.queue = asyncio.Queue(maxsize=90)  # ~1,5 detik di 60 fps
+        self.need_key = True
+
+
+def video_available(app, info):
+    return (IS_MAC and STREAMER.exists() and app.get("display_id") and info.get("h264")
+            and not app["cfg"].jpeg and not app.get("video_failed"))
+
+
+def request_keyframe(app):
+    proc = app.get("stream_proc")
+    if proc and proc.returncode is None:
+        try:
+            proc.stdin.write(b"k\n")
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
+
+async def stream_loop(app):
+    """Menjalankan screenstream selama ada tablet video, dan meneruskan setiap frame ke semua tablet."""
+    cfg = app["cfg"]
+    while app["video"]:
+        proc = await asyncio.create_subprocess_exec(
+            str(STREAMER), str(app["display_id"]), str(cfg.fps), str(cfg.bitrate),
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        app["stream_proc"] = proc
+        for c in app["video"].values():
+            c.need_key = True
+        try:
+            while True:
+                head = await proc.stdout.readexactly(4)
+                packet = await proc.stdout.readexactly(int.from_bytes(head, "big"))
+                key = packet[0] == 1
+                for c in list(app["video"].values()):
+                    if c.need_key and not key:
+                        continue
+                    try:
+                        c.queue.put_nowait(packet)
+                        c.need_key = False
+                    except asyncio.QueueFull:
+                        while not c.queue.empty():
+                            c.queue.get_nowait()
+                        c.need_key = True
+                        request_keyframe(app)
+        except asyncio.IncompleteReadError:
+            pass
+        finally:
+            if proc.returncode is None:
+                proc.terminate()
+        code = await proc.wait()
+        if code == 3:  # resolusi layar berubah: jalankan ulang dengan ukuran baru
+            continue
+        err = (await proc.stderr.read()).decode().strip()
+        if app["video"] and code not in (0, -15):
+            print(f"Video H.264 gagal ({err or code}); pindah ke mode gambar JPEG.")
+            app["video_failed"] = True
+            for ws in list(app["video"]):
+                await ws.close()  # tablet menyambung ulang dan otomatis memakai JPEG
+            break
+    app["stream_proc"] = None
+    app["stream_task"] = None
 
 
 def refresh_monitor(app):
@@ -507,11 +586,27 @@ async def ws_handler(request):
                 return ws
 
     mon, cond = app["mon"], app["cond"]
-    print(f"Tablet terhubung: {peer}")
-    await ws.send_json({"t": "hello", "w": mon["width"], "h": mon["height"]})
+    video = video_available(app, info)
+    print(f"Tablet terhubung: {peer}" + (" (video H.264)" if video else " (gambar JPEG)"))
+    await ws.send_json({"t": "hello", "w": mon["width"], "h": mon["height"], "codec": "h264" if video else "jpeg"})
     # maks 2 frame dalam perjalanan: tablet menampilkan satu sambil menerima berikutnya
     ready = asyncio.Semaphore(2)
-    app["clients"].add(ws)
+
+    async def video_sender(client):
+        try:
+            while not ws.closed:
+                await ws.send_bytes(await client.queue.get())
+        except (ConnectionResetError, asyncio.CancelledError):
+            pass
+
+    if video:
+        client = VideoClient()
+        app["video"][ws] = client
+        if not app.get("stream_task"):
+            app["stream_task"] = asyncio.create_task(stream_loop(app))
+        request_keyframe(app)
+    else:
+        app["clients"].add(ws)
 
     async def sender():
         last = 0
@@ -525,7 +620,7 @@ async def ws_handler(request):
         except (ConnectionResetError, asyncio.CancelledError):
             pass
 
-    task = asyncio.create_task(sender())
+    task = asyncio.create_task(video_sender(client) if video else sender())
     try:
         async for msg in ws:
             if msg.type != WSMsgType.TEXT:
@@ -538,6 +633,9 @@ async def ws_handler(request):
                 await loop.run_in_executor(app["input_pool"], handle_input, app["mon"], d)
     finally:
         app["clients"].discard(ws)
+        app["video"].pop(ws, None)
+        if not app["video"] and app.get("stream_proc") and app["stream_proc"].returncode is None:
+            app["stream_proc"].terminate()  # tidak ada tablet video lagi: hentikan perekam
         task.cancel()
         print(f"Tablet terputus: {peer}")
     return ws
@@ -563,7 +661,8 @@ async def api_status(request):
     mon = app["mon"]
     return web.json_response({
         **connection_info(app),
-        "clients": len(app["clients"]),
+        "clients": len(app["clients"]) + len(app["video"]),
+        "codec": "h264" if app["video"] else ("jpeg" if app["clients"] else None),
         "display": f"{mon['width']}x{mon['height']}" if mon else None,
         "virtual": bool(app.get("vd_proc")),
         "os": "mac" if IS_MAC else "windows" if IS_WIN else "other",
@@ -732,6 +831,9 @@ async def on_cleanup(app):
     app["capture"].cancel()
     if "usb" in app:
         app["usb"].cancel()
+    sp = app.get("stream_proc")
+    if sp and sp.returncode is None:
+        sp.terminate()
     proc = app.get("vd_proc")
     if proc and proc.returncode is None:
         proc.terminate()  # layar virtual ikut hilang
@@ -745,9 +847,11 @@ def main():
     p.add_argument("--monitor", type=int, help="pakai layar yang sudah ada (nomor dari --list)")
     p.add_argument("--list", action="store_true", help="tampilkan daftar layar lalu keluar")
     p.add_argument("--port", type=int, default=8765)
-    p.add_argument("--fps", type=int, default=30)
-    p.add_argument("--quality", type=int, default=65, help="kualitas JPEG 30-95")
-    p.add_argument("--max-width", type=int, default=1600, help="lebar maksimum gambar yang dikirim")
+    p.add_argument("--fps", type=int, default=60, help="frame per detik (mode JPEG praktis maks ~30)")
+    p.add_argument("--bitrate", type=int, default=20, help="bitrate video H.264 dalam Mbps")
+    p.add_argument("--jpeg", action="store_true", help="matikan video H.264, kirim gambar JPEG per frame")
+    p.add_argument("--quality", type=int, default=80, help="kualitas JPEG 30-95")
+    p.add_argument("--max-width", type=int, default=2800, help="lebar maksimum gambar yang dikirim")
     p.add_argument("--panel", action=argparse.BooleanOptionalAction, default=FROZEN,
                    help="buka halaman panel di browser komputer ini (default: aktif di versi installer)")
     p.add_argument("--no-install", action="store_true", help=argparse.SUPPRESS)
@@ -784,6 +888,7 @@ def main():
     app["cfg"] = cfg
     app["mon"] = None
     app["clients"] = set()
+    app["video"] = {}
     app["input_pool"] = ThreadPoolExecutor(max_workers=1)
     app["connection"] = load_settings().get("connection", "wifi")
     app["usb_url"] = f"http://localhost:{cfg.port}/{code}" if shutil.which("adb") else None

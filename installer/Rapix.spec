@@ -8,7 +8,7 @@ ROOT = HERE.parent
 IS_MAC = sys.platform == "darwin"
 VERSION = "1.1.0"
 
-binaries = [(str(ROOT / "virtualdisplay"), ".")] if IS_MAC else []
+binaries = [(str(ROOT / "virtualdisplay"), "."), (str(ROOT / "screenstream"), ".")] if IS_MAC else []
 icon = str(HERE / "build" / ("icon.icns" if IS_MAC else "icon.ico"))
 
 a = Analysis(

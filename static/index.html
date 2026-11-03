@@ -75,6 +75,36 @@ const statusText = document.getElementById('statusText');
 const ctx = img.getContext('2d');
 let ws, remoteW = 16, remoteH = 9, started = false, rx = 0, shown = 0;
 
+// video H.264 lewat WebCodecs (decoder hardware tablet); hanya di konteks aman, mis. http://localhost lewat USB
+const canVideo = typeof VideoDecoder !== 'undefined' && isSecureContext && !location.search.includes('jpeg');
+let codec = 'jpeg', decoder = null, needKey = true, ts = 0;
+
+function startDecoder() {
+  if (decoder && decoder.state !== 'closed') decoder.close();
+  needKey = true;
+  decoder = new VideoDecoder({
+    output: (frame) => {
+      if (img.width !== frame.displayWidth || img.height !== frame.displayHeight) {
+        img.width = frame.displayWidth; img.height = frame.displayHeight;
+      }
+      ctx.drawImage(frame, 0, 0);
+      frame.close();
+    },
+    // decoder gagal: muat ulang dalam mode JPEG supaya layar tetap tampil
+    error: () => { location.search = '?jpeg=1'; },
+  });
+  decoder.configure({ codec: 'avc1.640033', optimizeForLatency: true, hardwareAcceleration: 'prefer-hardware' });
+}
+
+function onVideo(buf) {
+  const data = new Uint8Array(buf);
+  const key = data[0] === 1;
+  if (needKey && !key) return;
+  needKey = false;
+  ts += 16667;
+  decoder.decode(new EncodedVideoChunk({ type: key ? 'key' : 'delta', timestamp: ts, data: data.subarray(1) }));
+}
+
 function setStatus(text, ok) {
   statusText.textContent = text;
   dot.classList.toggle('on', ok);
@@ -100,17 +130,22 @@ function connect() {
     // kirim ukuran layar tablet supaya MacBook membuat monitor dengan ukuran yang pas
     const landscape = innerWidth >= innerHeight;
     const a = Math.max(screen.width, screen.height), b = Math.min(screen.width, screen.height);
-    ws.send(JSON.stringify({ t: 'screen', w: landscape ? a : b, h: landscape ? b : a, dpr: devicePixelRatio }));
+    ws.send(JSON.stringify({ t: 'screen', w: landscape ? a : b, h: landscape ? b : a, dpr: devicePixelRatio, h264: canVideo }));
     setStatus('Terhubung', true);
     if (started) panel.classList.add('hidden');
   };
   ws.onmessage = (e) => {
     if (typeof e.data === 'string') {
       const d = JSON.parse(e.data);
-      if (d.t === 'hello') { remoteW = d.w; remoteH = d.h; layout(); }
+      if (d.t === 'hello') {
+        remoteW = d.w; remoteH = d.h; layout();
+        codec = d.codec || 'jpeg';
+        if (codec === 'h264') startDecoder();
+      }
       if (d.t === 'error') { started = false; panel.classList.remove('hidden'); setStatus('Gagal: ' + d.msg, false); }
       return;
     }
+    if (codec === 'h264') { onVideo(e.data); return; }
     // decode di luar thread utama; frame yang datang terlambat dibuang
     const n = ++rx;
     createImageBitmap(new Blob([e.data], { type: 'image/jpeg' })).then((bmp) => {

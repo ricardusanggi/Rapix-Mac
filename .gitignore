@@ -6,5 +6,6 @@ __pycache__/
 installer/build/
 installer/dist/
 virtualdisplay
+screenstream
 
 .DS_Store
