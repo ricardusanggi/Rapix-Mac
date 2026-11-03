@@ -15,8 +15,8 @@ a = Analysis(
     [str(ROOT / "server.py")],
     pathex=[str(ROOT)],
     binaries=binaries,
-    datas=[(str(ROOT / "static"), "static")],
-    hiddenimports=["qrcode.image.svg"] + (["Quartz", "HIServices", "AppKit", "Foundation"] if IS_MAC else []),
+    datas=[(str(ROOT / "static"), "static")] + ([(str(HERE / "build" / "menubar.png"), ".")] if IS_MAC else []),
+    hiddenimports=["qrcode.image.svg"] + (["Quartz", "HIServices", "AppKit", "Foundation", "WebKit"] if IS_MAC else []),
     excludes=["tkinter", "mouseinfo"],
 )
 pyz = PYZ(a.pure)

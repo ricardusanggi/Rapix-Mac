@@ -877,7 +877,10 @@ async def ws_handler(request):
     if not code_ok(request, request.query.get("k", ""), allow_token=True):
         raise web.HTTPForbidden()
     ws = web.WebSocketResponse(heartbeat=20, max_msg_size=0)
-    await ws.prepare(request)
+    try:
+        await ws.prepare(request)
+    except ConnectionResetError:
+        return ws  # perangkat memutus di tengah jabat tangan (mis. layar HP terkunci): abaikan
     loop = asyncio.get_running_loop()
     peer = request.remote
 
@@ -1096,6 +1099,13 @@ async def api_settings(request):
 
 
 @local_only
+async def api_show(request):
+    """Rapix dibuka lagi (mis. dari Launchpad) saat sudah berjalan: tampilkan jendela panelnya."""
+    show_panel(f"http://localhost:{request.app['cfg'].port}/panel")
+    return web.json_response({"ok": True})
+
+
+@local_only
 async def api_quit(request):
     print("Berhenti atas permintaan dari panel.")
     stop(request.app)
@@ -1279,7 +1289,12 @@ def main():
     if port_in_use(cfg.port):  # Rapix sudah berjalan: cukup tampilkan panelnya
         print(f"Rapix sudah berjalan di port {cfg.port}.")
         if cfg.panel:
-            webbrowser.open(panel_url)
+            import urllib.request
+            try:  # minta Rapix yang berjalan membuka jendela panelnya sendiri
+                urllib.request.urlopen(urllib.request.Request(f"http://127.0.0.1:{cfg.port}/api/show", method="POST"),
+                                       timeout=3)
+            except OSError:
+                webbrowser.open(panel_url)
         return
     if IS_MAC and not HELPER.exists() and not cfg.mirror:
         print("Peringatan: program 'virtualdisplay' belum di-compile, jadi hanya mode cermin.")
@@ -1304,6 +1319,7 @@ def main():
     app.router.add_get("/api/pair", api_pair)
     app.router.add_post("/api/settings/{which}", api_settings)
     app.router.add_post("/api/quit", api_quit)
+    app.router.add_post("/api/show", api_show)
     app.router.add_post("/api/restart", api_restart)
     app.router.add_post("/api/connection/{mode}", api_connection)
     app.router.add_post("/api/login/{state}", api_login)
@@ -1321,7 +1337,7 @@ def main():
 
     async def open_panel(_app):
         if cfg.panel:
-            asyncio.get_running_loop().call_later(0.5, webbrowser.open, panel_url)
+            asyncio.get_running_loop().call_later(0.5, show_panel, panel_url)
     app.on_startup.append(open_panel)
     if app_bundle():
         # sebagai aplikasi Mac: server jalan di thread terpisah, thread utama melayani macOS
@@ -1341,46 +1357,137 @@ def serve(app, port):
     loop.run_forever()
 
 
+PANEL = {"show": None}  # diisi run_menu_bar: menampilkan jendela panel native
+
+
+def show_panel(panel_url):
+    """Tampilkan panel: jendela Rapix sendiri saat berjalan sebagai aplikasi Mac, selain itu browser.
+    Aman dipanggil dari thread mana pun (jendela macOS hanya boleh disentuh dari thread utama)."""
+    if PANEL["show"]:
+        from PyObjCTools import AppHelper
+        AppHelper.callAfter(PANEL["show"])
+    else:
+        webbrowser.open(panel_url)
+
+
 def run_menu_bar(panel_url):
-    """Ikon Rapix di menu bar. Juga membuat macOS mengenali Rapix sebagai aplikasi yang hidup,
-    sehingga membuka Rapix lagi dari Launchpad cukup menampilkan panelnya."""
-    from AppKit import (NSApplication, NSApplicationActivationPolicyAccessory, NSImage, NSMenu,
-                        NSMenuItem, NSStatusBar, NSVariableStatusItemLength)
-    from Foundation import NSObject
+    """Ikon Rapix di menu bar dan jendela panel (WebKit, tanpa browser). Juga membuat macOS mengenali
+    Rapix sebagai aplikasi yang hidup, sehingga membuka Rapix lagi dari Launchpad cukup menampilkan panelnya."""
+    from AppKit import (NSAlert, NSAlertFirstButtonReturn, NSApplication, NSApplicationActivationPolicyAccessory,
+                        NSApplicationActivationPolicyRegular, NSBackingStoreBuffered, NSImage, NSMakeRect, NSMenu,
+                        NSMenuItem, NSStatusBar, NSVariableStatusItemLength, NSWindow,
+                        NSWindowStyleMaskClosable, NSWindowStyleMaskMiniaturizable, NSWindowStyleMaskResizable,
+                        NSWindowStyleMaskTitled)
+    from Foundation import NSURL, NSObject, NSURLRequest
+    from WebKit import WKWebView, WKWebViewConfiguration
+
+    nsapp = NSApplication.sharedApplication()
 
     class Delegate(NSObject):
+        window = None
+
         def applicationShouldHandleReopen_hasVisibleWindows_(self, _app, _flag):
-            webbrowser.open(panel_url)
+            self.openPanel_(None)
             return False
 
         def openPanel_(self, _sender):
-            webbrowser.open(panel_url)
+            if self.window is None:
+                self.window = self.makeWindow()
+            # selama jendela terbuka Rapix tampil di Dock dan Cmd+Tab seperti aplikasi biasa
+            nsapp.setActivationPolicy_(NSApplicationActivationPolicyRegular)
+            nsapp.activateIgnoringOtherApps_(True)
+            self.window.makeKeyAndOrderFront_(None)
+
+        def makeWindow(self):
+            style = (NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
+                     | NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable)
+            win = NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
+                NSMakeRect(0, 0, 920, 720), style, NSBackingStoreBuffered, False)
+            win.setTitle_("Rapix")
+            win.setMinSize_((420, 480))
+            win.setReleasedWhenClosed_(False)  # ditutup = disembunyikan; dibuka lagi tanpa memuat ulang
+            win.setDelegate_(self)
+            if not win.setFrameUsingName_("RapixPanel"):
+                win.center()
+            win.setFrameAutosaveName_("RapixPanel")  # ukuran & posisi jendela diingat
+            web = WKWebView.alloc().initWithFrame_configuration_(win.contentView().bounds(),
+                                                                 WKWebViewConfiguration.alloc().init())
+            web.setAutoresizingMask_(18)  # lebar & tinggi ikut jendela
+            web.setUIDelegate_(self)
+            web.loadRequest_(NSURLRequest.requestWithURL_(NSURL.URLWithString_(panel_url)))
+            win.contentView().addSubview_(web)
+            self.web = web
+            return win
+
+        def windowWillClose_(self, _note):
+            nsapp.setActivationPolicy_(NSApplicationActivationPolicyAccessory)  # kembali hanya di menu bar
+
+        # dialog JavaScript panel (mis. konfirmasi "Hentikan Rapix") sebagai dialog macOS
+        def webView_runJavaScriptConfirmPanelWithMessage_initiatedByFrame_completionHandler_(
+                self, _web, message, _frame, handler):
+            alert = NSAlert.alloc().init()
+            alert.setMessageText_(message)
+            alert.addButtonWithTitle_("OK")
+            alert.addButtonWithTitle_("Batal")
+            handler(alert.runModal() == NSAlertFirstButtonReturn)
+
+        def webView_runJavaScriptAlertPanelWithMessage_initiatedByFrame_completionHandler_(
+                self, _web, message, _frame, handler):
+            alert = NSAlert.alloc().init()
+            alert.setMessageText_(message)
+            alert.runModal()
+            handler()
 
         def quit_(self, _sender):
             print("Berhenti dari menu bar.")
             os._exit(0)  # layar virtual ikut hilang karena programnya berhenti saat Rapix tertutup
 
-    nsapp = NSApplication.sharedApplication()
     nsapp.setActivationPolicy_(NSApplicationActivationPolicyAccessory)
     delegate = Delegate.alloc().init()
     nsapp.setDelegate_(delegate)
+    PANEL["show"] = lambda: delegate.openPanel_(None)
+
+    def menu_item(menu, title, action, key="", target=delegate):
+        mi = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, action, key)
+        if target is not None:
+            mi.setTarget_(target)
+        menu.addItem_(mi)
+
+    # menu aplikasi saat jendela aktif: Cmd+W menutup jendela, Cmd+C menyalin (alamat, log)
+    main = NSMenu.alloc().init()
+    for title, items in (("Rapix", (("Sembunyikan Rapix", "hide:", "h", None), (None,) * 4,
+                                    ("Hentikan Rapix", "quit:", "", delegate))),
+                         ("Edit", (("Salin", "copy:", "c", None), ("Pilih Semua", "selectAll:", "a", None))),
+                         ("Jendela", (("Tutup", "performClose:", "w", None), ("Kecilkan", "performMiniaturize:", "m", None)))):
+        top = NSMenuItem.alloc().init()
+        sub = NSMenu.alloc().initWithTitle_(title)
+        for t, action, key, target in items:
+            if t is None:
+                sub.addItem_(NSMenuItem.separatorItem())
+            else:
+                menu_item(sub, t, action, key, target)
+        top.setSubmenu_(sub)
+        main.addItem_(top)
+    nsapp.setMainMenu_(main)
 
     item = NSStatusBar.systemStatusBar().statusItemWithLength_(NSVariableStatusItemLength)
-    icon = NSImage.imageWithSystemSymbolName_accessibilityDescription_("rectangle.on.rectangle", "Rapix")
+    # logo Rapix sebagai gambar template: macOS mewarnainya sendiri untuk menu bar terang/gelap
+    icon = None
+    if (BUNDLE / "menubar.png").exists():
+        icon = NSImage.alloc().initWithContentsOfFile_(str(BUNDLE / "menubar.png"))
+        icon.setSize_((18, 18))
+        icon.setTemplate_(True)
+    icon = icon or NSImage.imageWithSystemSymbolName_accessibilityDescription_("rectangle.on.rectangle", "Rapix")
     if icon:
         item.button().setImage_(icon)
     else:
         item.button().setTitle_("Rapix")
     menu = NSMenu.alloc().init()
-    for title, action in (("Buka panel Rapix", "openPanel:"), (None, None), ("Berhenti", "quit:")):
-        if title is None:
-            menu.addItem_(NSMenuItem.separatorItem())
-            continue
-        mi = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, action, "")
-        mi.setTarget_(delegate)
-        menu.addItem_(mi)
+    menu_item(menu, "Buka panel Rapix", "openPanel:")
+    menu.addItem_(NSMenuItem.separatorItem())
+    menu_item(menu, "Berhenti", "quit:")
     item.setMenu_(menu)
-    run_menu_bar.keep = (delegate, item, menu)  # cegah dibersihkan garbage collector
+    run_menu_bar.keep = (delegate, item, menu, main)  # cegah dibersihkan garbage collector
     nsapp.run()
 
 
