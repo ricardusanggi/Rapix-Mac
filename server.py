@@ -560,66 +560,6 @@ def handle_input(mon, d):
         type_text(d.get("s", ""))
     elif IS_MAC and t == "pen":
         pen_event(mon, d)
-    elif IS_MAC and t == "scroll2":
-        smooth_scroll(mon, d)
-    elif t == "scroll_stop":
-        _momentum["gen"] += 1
-    elif IS_MAC and t == "zoom":
-        shortcut(24 if int(d.get("steps", 0)) > 0 else 27, 0x100000, abs(int(d.get("steps", 0))))  # Cmd+= / Cmd+-
-    elif IS_MAC and t == "swipe":
-        # seperti trackpad: geser ke kiri = desktop di kanan; ke atas = Mission Control; ke bawah = App Exposé
-        key = {"left": 124, "right": 123, "up": 126, "down": 125}.get(d.get("dir"))
-        if key is not None:
-            shortcut(key, 0x40000)  # Control + panah
-
-
-# ---------- gerakan trackpad dari layar sentuh tablet ----------
-SCROLL_PHASE = {"begin": 1, "move": 2, "end": 4}
-_momentum = {"gen": 0}
-
-
-def scroll_pixels(dx, dy, phase=0, momentum=0):
-    import Quartz
-    e = Quartz.CGEventCreateScrollWheelEvent2(None, Quartz.kCGScrollEventUnitPixel, 2, int(round(dy)), int(round(dx)), 0)
-    # ditandai sebagai gulir trackpad (kontinu, dengan fase) supaya aplikasi menggulir mulus dan memantul di ujung
-    Quartz.CGEventSetIntegerValueField(e, Quartz.kCGScrollWheelEventIsContinuous, 1)
-    Quartz.CGEventSetIntegerValueField(e, Quartz.kCGScrollWheelEventScrollPhase, phase)
-    Quartz.CGEventSetIntegerValueField(e, Quartz.kCGScrollWheelEventMomentumPhase, momentum)
-    Quartz.CGEventPost(Quartz.kCGHIDEventTap, e)
-
-
-def smooth_scroll(mon, d):
-    """Dua jari: gulir mengikuti jari per piksel; saat jari diangkat dengan cepat, gulir berlanjut melambat."""
-    import threading
-    _momentum["gen"] += 1  # sentuhan baru menghentikan momentum yang sedang berjalan
-    # gerakan tablet dikirim relatif terhadap lebar/tinggi layar; ubah ke piksel layar Mac
-    dx, dy = float(d.get("dx", 0)) * mon["width"], float(d.get("dy", 0)) * mon["height"]
-    ph = d.get("ph", "move")
-    scroll_pixels(dx, dy, SCROLL_PHASE.get(ph, 2))
-    vx, vy = float(d.get("vx", 0)) * mon["width"], float(d.get("vy", 0)) * mon["height"]
-    if ph == "end" and abs(vx) + abs(vy) > 150:
-        gen = _momentum["gen"]
-        threading.Thread(target=momentum, args=(gen, vx, vy), daemon=True).start()
-
-
-def momentum(gen, vx, vy):
-    step, first = 1 / 60, True
-    while _momentum["gen"] == gen and abs(vx) + abs(vy) > 20:
-        scroll_pixels(vx * step, vy * step, momentum=1 if first else 2)
-        first = False
-        vx, vy = vx * 0.94, vy * 0.94
-        time.sleep(step)
-    if not first:
-        scroll_pixels(0, 0, momentum=3)
-
-
-def shortcut(keycode, flags, times=1):
-    import Quartz
-    for _ in range(max(1, times)):
-        for down in (True, False):
-            e = Quartz.CGEventCreateKeyboardEvent(None, keycode, down)
-            Quartz.CGEventSetFlags(e, flags)
-            Quartz.CGEventPost(Quartz.kCGHIDEventTap, e)
 
 
 # ---------- keyboard & pen tablet (aplikasi Android) ----------
