@@ -209,7 +209,8 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                 Log.w(TAG, "koneksi: " + e.getMessage());
                 boolean paired = !prefs().getString("hosts", "").isEmpty();
                 String msg = String.valueOf(e.getMessage());
-                setStatus(msg.contains(" 403 ") || msg.contains(" 429 ")
+                setStatus(refusal != null ? refusal  // ditolak Mac (mis. layar Wi-Fi sudah dipakai): tetap tampilkan alasannya
+                        : msg.contains(" 403 ") || msg.contains(" 429 ")
                         ? "MacBook menolak koneksi Wi-Fi.\nColok kabel USB sekali untuk memasangkan ulang."
                         : paired ? "Menunggu Rapix di MacBook…\nLewat kabel USB atau Wi-Fi yang sama."
                         : "Menunggu Rapix di MacBook…\nColok kabel USB sekali; setelah itu bisa lewat Wi-Fi.");
@@ -224,6 +225,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     }
 
     private volatile String link;  // "usb" / "wifi" / null
+    private volatile String refusal;  // alasan terakhir Mac menolak koneksi; aplikasi terus mencoba lagi
 
     private android.content.SharedPreferences prefs() {
         return getSharedPreferences("rapix", MODE_PRIVATE);
@@ -330,9 +332,19 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         try {
             JSONObject o = new JSONObject().put("t", "screen")
                     .put("w", Math.round(w / m.density)).put("h", Math.round(h / m.density))
-                    .put("dpr", m.density).put("h264", true);
+                    .put("dpr", m.density).put("h264", true).put("device", deviceId());
             ws.sendText(o.toString());
         } catch (JSONException ignored) { }
+    }
+
+    /** ID acak yang tetap untuk tablet ini: Mac memberi setiap perangkat layarnya sendiri (layar ke-2, ke-3, ...). */
+    private String deviceId() {
+        String id = prefs().getString("device", "");
+        if (id.isEmpty()) {
+            id = "app-" + java.util.UUID.randomUUID().toString().replace("-", "").substring(0, 16);
+            prefs().edit().putString("device", id).apply();
+        }
+        return id;
     }
 
     private void handleText(String text) {
@@ -340,7 +352,8 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
             JSONObject d = new JSONObject(text);
             String t = d.optString("t");
             if (t.equals("error")) {
-                setStatus("Gagal: " + d.optString("msg"));
+                refusal = d.optString("msg");
+                setStatus(refusal);
             } else if (t.equals("hello")) {
                 if (!"h264".equals(d.optString("codec"))) {
                     setStatus("Rapix di MacBook belum mengirim video H.264.\nPerbarui Rapix lalu coba lagi.");
@@ -355,6 +368,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
                 // ukuran sebenarnya dibaca decoder dari aliran video; ini hanya perkiraan awal (Retina 2x)
                 player = new VideoPlayer(surface, d.getInt("w") * 2, d.getInt("h") * 2, fps,
                         () -> send("{\"t\":\"key\"}"));
+                refusal = null;
                 setStatus(null);
                 Log.i(TAG, "video " + d.getInt("w") + "x" + d.getInt("h") + " @ " + fps + " fps");
             }

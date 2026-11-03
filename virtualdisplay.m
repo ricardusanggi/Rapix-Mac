@@ -2,7 +2,9 @@
 // Memakai API CGVirtualDisplay bawaan macOS (sama seperti yang dipakai BetterDisplay & Chromium).
 // Layar virtual hidup selama program ini berjalan; begitu ditutup, layarnya hilang.
 //
-// Pemakaian: ./virtualdisplay LEBAR TINGGI [hidpi 0/1] [refresh Hz, bawaan 60]
+// Pemakaian: ./virtualdisplay LEBAR TINGGI [hidpi 0/1] [refresh Hz, bawaan 60] [nomor] [nama]
+// "nomor" membedakan layar Rapix satu dengan lainnya (tablet kedua, ketiga, ...) supaya macOS
+// mengingat posisi masing-masing di Arrange.
 
 #import <Foundation/Foundation.h>
 #import <CoreGraphics/CoreGraphics.h>
@@ -73,6 +75,8 @@ int main(int argc, const char *argv[]) {
         unsigned int h = (unsigned int)atoi(argv[2]);
         BOOL hidpi = argc > 3 && atoi(argv[3]) != 0;
         double hz = argc > 4 ? atof(argv[4]) : 60;
+        unsigned int number = argc > 5 ? (unsigned int)atoi(argv[5]) : 1;
+        NSString *name = argc > 6 ? [NSString stringWithUTF8String:argv[6]] : @"Rapix";
         unsigned int scale = hidpi ? 2 : 1;
 
         Class Desc = NSClassFromString(@"CGVirtualDisplayDescriptor");
@@ -86,14 +90,14 @@ int main(int argc, const char *argv[]) {
 
         CGVirtualDisplayDescriptor *desc = [[Desc alloc] init];
         desc.queue = dispatch_get_main_queue();
-        desc.name = @"Rapix";
+        desc.name = name;
         desc.maxPixelsWide = w * scale;
         desc.maxPixelsHigh = h * scale;
         double ppi = hidpi ? 220.0 : 110.0;
         desc.sizeInMillimeters = CGSizeMake(25.4 * w * scale / ppi, 25.4 * h * scale / ppi);
         desc.vendorID = 0x5250;   // "RP"
         desc.productID = 0x0002;
-        desc.serialNum = 0x0001;
+        desc.serialNum = number;
         desc.terminationHandler = ^(id a, id b) { exit(0); };
 
         gDisplay = [[Disp alloc] initWithDescriptor:desc];

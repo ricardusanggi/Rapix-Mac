@@ -44,7 +44,6 @@ if IS_MAC:
 STATIC = BUNDLE / "static"
 HELPER = BUNDLE / "virtualdisplay"
 STREAMER = BUNDLE / "screenstream"  # perekam layar -> video H.264 (ScreenCaptureKit + VideoToolbox)
-STATE = {"frame": None, "seq": 0}
 
 # aplikasi yang dibuka dari Finder/Start Menu tidak mewarisi PATH terminal; tambahkan lokasi umum adb
 _extra = [
@@ -317,6 +316,15 @@ def wired_addresses():
     return found
 
 
+def via_cable(peer):
+    """Tablet tersambung kabel: lewat adb (terlihat sebagai localhost) atau USB tethering (satu jaringan
+    dengan alamat kabel Mac). Selain itu dianggap Wi-Fi."""
+    if peer in ("127.0.0.1", "::1"):
+        return True
+    prefix = peer.rsplit(".", 1)[0] + "."
+    return any(ip.startswith(prefix) for ip in wired_addresses())
+
+
 def monitors():
     with mss.mss() as sct:
         return sct.monitors[1:]  # indeks 0 = gabungan semua layar
@@ -336,22 +344,98 @@ def print_qr(url):
         pass
 
 
-# ---------- layar virtual ----------
-async def create_virtual_display(app, w, h, hidpi):
+# ---------- layar virtual: satu per perangkat ----------
+class Screen:
+    """Satu layar untuk satu perangkat (tablet/HP): layar virtualnya, perekam videonya, dan klien yang
+    menampilkannya. Perangkat pertama jadi layar ke-2, perangkat berikutnya layar ke-3, dan seterusnya."""
+
+    def __init__(self, key, number):
+        self.key, self.number = key, number
+        self.mon = None           # posisi & ukuran layar di macOS (poin)
+        self.display_id = None
+        self.vd_proc = None       # proses virtualdisplay; layar hilang saat proses ini berhenti
+        self.video = {}           # ws -> VideoClient (H.264)
+        self.clients = set()      # ws klien JPEG
+        self.pending = 0          # koneksi yang sedang disiapkan (belum masuk video/clients)
+        self.wifi_clients = set() # bagian dari clients yang lewat Wi-Fi
+        self.stream_proc = self.stream_task = self.stream_mode = None
+        self.cond = asyncio.Condition()
+        self.frame, self.seq = None, 0
+        self.sct = {}             # cache grab_frame: frame terakhir, supaya layar diam tidak dikirim ulang
+        self.empty_since = None
+        self.video_failed = False # H.264 tidak bisa untuk layar ini: tabletnya memakai JPEG
+
+    @property
+    def name(self):
+        return "Rapix" if self.number == 1 else f"Rapix {self.number}"
+
+    @property
+    def label(self):  # layar bawaan MacBook = layar ke-1
+        return f"Layar ke-{self.number + 1}"
+
+    @property
+    def connected(self):
+        # "pending": perangkat yang sedang disiapkan layarnya ikut dihitung, supaya layarnya tidak diambil
+        # perangkat lain atau dilepas sebelum selesai dibuat
+        return len(self.video) + len(self.clients) + self.pending
+
+    @property
+    def uses_wifi(self):
+        return bool(self.wifi_clients) or any(c.wifi for c in self.video.values())
+
+
+def device_key(app, info, peer):
+    """Perangkat dikenali dari ID yang dikirim aplikasi/browser tablet (jadi pindah kabel <-> Wi-Fi tetap
+    layar yang sama); tanpa ID, dari alamat IP-nya. Mode cermin/--monitor: semua perangkat berbagi satu layar."""
+    cfg = app["cfg"]
+    if cfg.monitor is not None or cfg.mirror or not (IS_MAC and HELPER.exists()):
+        return "bersama"
+    return str(info.get("device") or "")[:64] or peer
+
+
+def get_screen(app, key):
+    """Layar milik perangkat ini; dibuat (dengan nomor berikutnya) bila belum ada."""
+    screens = app["screens"]
+    if key not in screens:
+        # yang dihitung hanya layar yang perangkatnya sedang tersambung: nomor terkecil yang belum dipakai
+        # perangkat tersambung. Nomor lama perangkat ini diutamakan bila kosong (posisinya di Arrange ikut diingat).
+        remembered = load_settings().get("screens", {})
+        busy = {s.number for s in screens.values() if s.connected}
+        number = remembered.get(key)
+        if not number or number in busy:
+            number = next(n for n in range(1, 100) if n not in busy)
+        for old in [s for s in screens.values() if s.number == number and not s.connected]:
+            close_screen(app, old)  # layar perangkat yang sudah pergi memberi nomornya ke perangkat baru
+        screens[key] = Screen(key, number)
+        if remembered.get(key) != number:
+            kept = {k: n for k, n in remembered.items() if k != key}
+            kept[key] = number
+            save_settings(screens=dict(list(kept.items())[-8:]))  # cukup 8 perangkat terakhir
+    return screens[key]
+
+
+async def create_virtual_display(app, scr, w, h, hidpi):
     before = {mon_key(m) for m in monitors()}
-    proc = await asyncio.create_subprocess_exec(
-        str(HELPER), str(w), str(h), "1" if hidpi else "0", str(app["cfg"].hz),
-        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-    )
-    try:
-        line = await asyncio.wait_for(proc.stdout.readline(), 10)
-    except asyncio.TimeoutError:
-        line = b""
-    if not line.startswith(b"READY"):
+    # nomor seri = nomor layar, supaya macOS mengingat posisinya di Arrange. Jika macOS menolak (layar lama
+    # dengan nomor seri sama belum benar-benar hilang), coba lagi sebentar kemudian dengan nomor seri lain.
+    for attempt, serial in enumerate((scr.number, scr.number, 100 + scr.number)):
+        if attempt:
+            await asyncio.sleep(1)
+        proc = await asyncio.create_subprocess_exec(
+            str(HELPER), str(w), str(h), "1" if hidpi else "0", str(app["cfg"].hz), str(serial), scr.name,
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            line = await asyncio.wait_for(proc.stdout.readline(), 10)
+        except asyncio.TimeoutError:
+            line = b""
+        if line.startswith(b"READY"):
+            break
         err = (await proc.stderr.read()).decode().strip()
+    else:
         raise RuntimeError(err or "Layar virtual gagal dibuat")
-    app["vd_proc"] = proc
-    app["display_id"] = int(line.split()[1])
+    scr.vd_proc = proc
+    scr.display_id = int(line.split()[1])
 
     for _ in range(50):  # tunggu macOS memasang layar baru (maks 10 detik)
         await asyncio.sleep(0.2)
@@ -361,7 +445,7 @@ async def create_virtual_display(app, w, h, hidpi):
     raise RuntimeError("Layar virtual dibuat tapi tidak terdeteksi macOS")
 
 
-async def setup_display(app, info):
+async def setup_display(app, scr, info):
     cfg = app["cfg"]
     mons = monitors()
     if cfg.monitor is not None:
@@ -379,10 +463,33 @@ async def setup_display(app, info):
         w, h = int(info.get("w", 1280)), int(info.get("h", 800))
         hidpi = float(info.get("dpr", 1)) >= 1.5
     w, h = w - w % 2, h - h % 2
-    print(f"Membuat layar kedua {w}x{h}{' (Retina)' if hidpi else ''}…")
-    mon = await create_virtual_display(app, w, h, hidpi)
-    print("Layar kedua aktif. Atur posisinya di System Settings → Displays → Arrange.")
+    print(f"Membuat {scr.label.lower()} {w}x{h}{' (Retina)' if hidpi else ''}…")
+    mon = await create_virtual_display(app, scr, w, h, hidpi)
+    print(f"{scr.label} aktif. Atur posisinya di System Settings → Displays → Arrange.")
     return mon
+
+
+def close_screen(app, scr):
+    for proc in (scr.stream_proc, scr.vd_proc):
+        if proc and proc.returncode is None:
+            proc.terminate()  # layar virtual ikut hilang
+    app["screens"].pop(scr.key, None)
+
+
+async def screen_reaper(app):
+    """Layar yang perangkatnya pergi lebih dari 60 detik dilepas, selama masih ada layar Rapix lain
+    (layar terakhir tetap ada, seperti sebelumnya). Jeda ini memberi waktu tablet pindah kabel <-> Wi-Fi."""
+    while True:
+        await asyncio.sleep(10)
+        now = time.time()
+        for scr in list(app["screens"].values()):
+            if scr.connected:
+                scr.empty_since = None
+            elif scr.empty_since is None:
+                scr.empty_since = now
+            elif len(app["screens"]) > 1 and now - scr.empty_since > 60:
+                print(f"{scr.label} dilepas (perangkat tidak tersambung).")
+                close_screen(app, scr)
 
 
 # ---------- tangkap layar ----------
@@ -392,7 +499,7 @@ CURSOR_EDGE = [(0, 0), (0, 17), (4.5, 13), (7.5, 19.5), (10, 18.5), (7, 12.5), (
 CURSOR_FILL = [(1.4, 3.3), (1.4, 13.6), (4.9, 10.6), (7.9, 17.6), (8.7, 17.3), (5.7, 11.1), (9.2, 11.1)]
 
 
-def grab_frame(mon, max_width, quality):
+def grab_frame(mon, max_width, quality, cache):
     if "s" not in _sct:
         _sct["s"] = mss.mss()
     shot = _sct["s"].grab(mon)
@@ -400,9 +507,9 @@ def grab_frame(mon, max_width, quality):
 
     # layar tidak berubah -> tidak perlu encode dan kirim ulang
     raw = shot.bgra
-    if raw == _sct.get("raw") and (cx, cy) == _sct.get("cur"):
+    if raw == cache.get("raw") and (cx, cy) == cache.get("cur"):
         return None
-    _sct["raw"], _sct["cur"] = raw, (cx, cy)
+    cache["raw"], cache["cur"] = raw, (cx, cy)
 
     img = Image.frombytes("RGB", shot.size, raw, "raw", "BGRX")
 
@@ -428,25 +535,27 @@ def grab_frame(mon, max_width, quality):
 
 
 async def capture_loop(app):
-    cfg, cond = app["cfg"], app["cond"]
+    cfg = app["cfg"]
     loop = asyncio.get_running_loop()
     pool = ThreadPoolExecutor(max_workers=1)
     interval = 1.0 / min(cfg.fps, 30)  # JPEG Retina per frame tidak sanggup lebih dari ~30 fps
     while True:
         t0 = time.perf_counter()
-        if app["video"] and app["mon"]:
-            refresh_monitor(app)  # tablet video tetap butuh posisi layar terbaru untuk sentuhan
-        if app["clients"] and app["mon"]:
+        for scr in list(app["screens"].values()):
+            if not scr.mon:
+                continue
+            if scr.video:
+                refresh_monitor(scr)  # tablet video tetap butuh posisi layar terbaru untuk sentuhan
+            if not scr.clients:
+                continue
             try:
-                refresh_monitor(app)
-                data = await loop.run_in_executor(pool, grab_frame, app["mon"], cfg.max_width, cfg.quality)
-                if data is None:
-                    await asyncio.sleep(max(0.0, interval - (time.perf_counter() - t0)))
-                    continue
-                async with cond:
-                    STATE["frame"] = data
-                    STATE["seq"] += 1
-                    cond.notify_all()
+                refresh_monitor(scr)
+                data = await loop.run_in_executor(pool, grab_frame, scr.mon, cfg.max_width, cfg.quality, scr.sct)
+                if data is not None:
+                    async with scr.cond:
+                        scr.frame = data
+                        scr.seq += 1
+                        scr.cond.notify_all()
             except Exception as e:
                 print("Gagal menangkap layar (cek izin Screen Recording):", e)
                 await asyncio.sleep(2)
@@ -464,49 +573,48 @@ class VideoClient:
         self.wifi = wifi  # lewat Wi-Fi (bukan kabel USB)
 
 
-def wanted_mode(app, extra_wifi=False):
+def wanted_mode(app, scr, extra_wifi=False):
     """(fps, bitrate). Lewat kabel tablet ikut terisi daya: refresh tinggi dan kualitas penuh.
     Ada tablet lewat Wi-Fi: 60 fps dan bitrate lebih rendah, karena radio Wi-Fi termasuk pemakan baterai terbesar."""
     cfg = app["cfg"]
-    if extra_wifi or any(c.wifi for c in app["video"].values()):
+    if extra_wifi or any(c.wifi for c in scr.video.values()):
         return cfg.wifi_hz, cfg.wifi_bitrate
     return cfg.hz, cfg.bitrate
 
 
-def set_refresh(app, hz):
+def set_refresh(scr, hz):
     """Ganti refresh rate layar virtual (mode 60 Hz dan refresh tinggi sudah disiapkan virtualdisplay)."""
     import Quartz
-    did, mon = app.get("display_id"), app.get("mon")
-    if not did or not mon:
+    if not scr.display_id or not scr.mon:
         return
-    cur = Quartz.CGDisplayCopyDisplayMode(did)
+    cur = Quartz.CGDisplayCopyDisplayMode(scr.display_id)
     if not cur or abs(Quartz.CGDisplayModeGetRefreshRate(cur) - hz) < 1:
         return
     opts = {Quartz.kCGDisplayShowDuplicateLowResolutionModes: True}
-    for m in Quartz.CGDisplayCopyAllDisplayModes(did, opts) or []:
-        same_size = (Quartz.CGDisplayModeGetWidth(m) == mon["width"]
+    for m in Quartz.CGDisplayCopyAllDisplayModes(scr.display_id, opts) or []:
+        same_size = (Quartz.CGDisplayModeGetWidth(m) == scr.mon["width"]
                      and Quartz.CGDisplayModeGetPixelWidth(m) == Quartz.CGDisplayModeGetPixelWidth(cur))
         if same_size and abs(Quartz.CGDisplayModeGetRefreshRate(m) - hz) < 1:
             err, cfg = Quartz.CGBeginDisplayConfiguration(None)
-            Quartz.CGConfigureDisplayWithDisplayMode(cfg, did, m, None)
+            Quartz.CGConfigureDisplayWithDisplayMode(cfg, scr.display_id, m, None)
             Quartz.CGCompleteDisplayConfiguration(cfg, Quartz.kCGConfigurePermanently)
-            print(f"Layar kedua {hz} Hz.")
+            print(f"{scr.label} {hz} Hz.")
             return
 
 
-def restart_stream_if_needed(app):
-    proc = app.get("stream_proc")
-    if proc and proc.returncode is None and app["video"] and app.get("stream_mode") != wanted_mode(app):
+def restart_stream_if_needed(app, scr):
+    proc = scr.stream_proc
+    if proc and proc.returncode is None and scr.video and scr.stream_mode != wanted_mode(app, scr):
         proc.terminate()  # stream_loop menjalankan ulang dengan fps/bitrate baru
 
 
-def video_available(app, info):
-    return (IS_MAC and STREAMER.exists() and app.get("display_id") and info.get("h264")
-            and not app["cfg"].jpeg and not app.get("video_failed"))
+def video_available(app, scr, info):
+    return (IS_MAC and STREAMER.exists() and scr.display_id and info.get("h264")
+            and not app["cfg"].jpeg and not scr.video_failed)
 
 
-def request_keyframe(app):
-    proc = app.get("stream_proc")
+def request_keyframe(scr):
+    proc = scr.stream_proc
     if proc and proc.returncode is None:
         try:
             proc.stdin.write(b"k\n")
@@ -514,26 +622,26 @@ def request_keyframe(app):
             pass
 
 
-async def stream_loop(app):
-    """Menjalankan screenstream selama ada tablet video, dan meneruskan setiap frame ke semua tablet."""
-    cfg = app["cfg"]
-    while app["video"]:
-        app["stream_mode"] = fps, bitrate = wanted_mode(app)
+async def stream_loop(app, scr):
+    """Menjalankan screenstream untuk satu layar selama ada tablet video, dan meneruskan frame ke tablet itu."""
+    fails, last_fail = 0, 0.0
+    while scr.video:
+        scr.stream_mode = fps, bitrate = wanted_mode(app, scr)
         if IS_MAC:
-            set_refresh(app, fps)
+            set_refresh(scr, fps)
         proc = await asyncio.create_subprocess_exec(
-            str(STREAMER), str(app["display_id"]), str(fps), str(bitrate),
+            str(STREAMER), str(scr.display_id), str(fps), str(bitrate),
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
         )
-        app["stream_proc"] = proc
-        for c in app["video"].values():
+        scr.stream_proc = proc
+        for c in scr.video.values():
             c.need_key = True
         try:
             while True:
                 head = await proc.stdout.readexactly(4)
                 packet = await proc.stdout.readexactly(int.from_bytes(head, "big"))
                 key = packet[0] == 1
-                for c in list(app["video"].values()):
+                for c in list(scr.video.values()):
                     if c.need_key and not key:
                         continue
                     try:
@@ -543,7 +651,7 @@ async def stream_loop(app):
                         while not c.queue.empty():
                             c.queue.get_nowait()
                         c.need_key = True
-                        request_keyframe(app)
+                        request_keyframe(scr)
         except asyncio.IncompleteReadError:
             pass
         finally:
@@ -552,28 +660,37 @@ async def stream_loop(app):
         code = await proc.wait()
         if code == 3:  # resolusi layar berubah: jalankan ulang dengan ukuran baru
             continue
-        err = (await proc.stderr.read()).decode().strip()
-        if app["video"] and code not in (0, -15):
-            print(f"Video H.264 gagal ({err or code}); pindah ke mode gambar JPEG.")
-            app["video_failed"] = True
-            for ws in list(app["video"]):
+        if scr.key not in app["screens"] or not scr.vd_proc or scr.vd_proc.returncode is not None:
+            break  # layar ini sudah dilepas: perekamnya memang berhenti
+        err = (await proc.stderr.read()).decode().strip().splitlines()
+        if scr.video and code not in (0, -15):
+            fails = fails + 1 if time.time() - last_fail < 30 else 1
+            last_fail = time.time()
+            reason = (err[-1] if err else "") or f"kode {code}"
+            if fails < 3:  # gangguan sesaat (mis. layar sedang diatur macOS): coba lagi
+                print(f"Video {scr.label.lower()} berhenti ({reason}); mencoba lagi…")
+                await asyncio.sleep(1)
+                continue
+            # tetap gagal: hanya layar ini yang pindah ke JPEG, layar lain tetap video
+            print(f"Video H.264 {scr.label.lower()} gagal ({reason}); pindah ke mode gambar JPEG.")
+            scr.video_failed = True
+            for ws in list(scr.video):
                 await ws.close()  # tablet menyambung ulang dan otomatis memakai JPEG
             break
-    app["stream_proc"] = None
-    app["stream_task"] = None
+    scr.stream_proc = None
+    scr.stream_task = None
 
 
-def refresh_monitor(app):
+def refresh_monitor(scr):
     # macOS bisa memindahkan layar virtual setelah dibuat (posisi tersimpan, atau diatur di Arrange);
     # baca ulang posisinya dari ID layar agar gambar dan sentuhan selalu ke tempat yang benar
-    did = app.get("display_id")
-    if not did:
+    if not scr.display_id:
         return
     import Quartz
-    r = Quartz.CGDisplayBounds(did)
+    r = Quartz.CGDisplayBounds(scr.display_id)
     if r.size.width:
-        app["mon"] = {"left": int(r.origin.x), "top": int(r.origin.y),
-                      "width": int(r.size.width), "height": int(r.size.height)}
+        scr.mon = {"left": int(r.origin.x), "top": int(r.origin.y),
+                   "width": int(r.size.width), "height": int(r.size.height)}
 
 
 # ---------- input dari tablet ----------
@@ -705,6 +822,7 @@ def proximity(enter):
 # alamat itu diblokir sebentar
 FAILS = {}  # ip -> [jumlah salah, waktu mulai]
 MAX_FAILS, FAIL_WINDOW, BLOCK_SECONDS = 8, 60, 300
+REFUSED = {}  # ip -> waktu terakhir dicatat ditolak karena batas layar Wi-Fi
 
 
 def blocked(ip):
@@ -759,24 +877,45 @@ async def ws_handler(request):
     except asyncio.TimeoutError:
         pass
 
-    async with app["setup_lock"]:
-        if app["mon"] is None:
-            try:
-                app["mon"] = await setup_display(app, info)
-            except Exception as e:
-                print("Error:", e)
-                await ws.send_json({"t": "error", "msg": str(e)})
-                await ws.close()
-                return ws
-
-    mon, cond = app["mon"], app["cond"]
-    video = video_available(app, info)
-    wifi = peer not in ("127.0.0.1", "::1")
-    print(f"Tablet terhubung: {peer}" + (" (video H.264)" if video else " (gambar JPEG)"))
-    # fps yang akan dipakai setelah tablet ini bergabung; tablet meminta refresh layar yang sama
-    fps = wanted_mode(app, extra_wifi=wifi)[0] if video else app["cfg"].fps
-    await ws.send_json({"t": "hello", "w": mon["width"], "h": mon["height"], "codec": "h264" if video else "jpeg",
-                        "fps": fps})
+    wifi = not via_cable(peer)
+    key = device_key(app, info, peer)
+    # aturan: lewat kabel boleh banyak layar tambahan; lewat Wi-Fi hanya satu (di luar layar milik perangkat ini).
+    # Dicek sebelum layar dibuat, jadi perangkat yang ditolak tidak mendapat (dan tidak menyimpan) nomor layar.
+    if wifi and any(s.key != key and s.uses_wifi for s in app["screens"].values()):
+        if time.time() - REFUSED.get(peer, 0) > 60:  # perangkat terus mencoba ulang: cukup dicatat sekali per menit
+            print(f"Tablet {peer} ditolak: lewat Wi-Fi hanya 1 layar tambahan.")
+            REFUSED[peer] = time.time()
+        await ws.send_json({"t": "error", "msg": "Lewat Wi-Fi hanya 1 layar tambahan, dan sedang dipakai perangkat lain. "
+                                                 "Colok kabel USB untuk layar berikutnya."})
+        await ws.close()
+        return ws
+    scr = get_screen(app, key)
+    scr.pending += 1  # sejak sekarang layar ini milik perangkat ini, walau belum selesai disiapkan
+    error = None
+    try:
+        async with app["setup_lock"]:  # satu per satu: layar baru dikenali dengan membandingkan daftar layar
+            if scr.mon is None:
+                try:
+                    scr.mon = await setup_display(app, scr, info)
+                except Exception as e:
+                    error = str(e)
+        if not error:
+            video = video_available(app, scr, info)
+            who = f"{peer} → {scr.label.lower()}" if len(app["screens"]) > 1 else peer
+            print(f"Tablet terhubung: {who}" + (" (video H.264)" if video else " (gambar JPEG)"))
+            # fps yang akan dipakai setelah tablet ini bergabung; tablet meminta refresh layar yang sama
+            fps = wanted_mode(app, scr, extra_wifi=wifi)[0] if video else app["cfg"].fps
+            await ws.send_json({"t": "hello", "w": scr.mon["width"], "h": scr.mon["height"],
+                                "codec": "h264" if video else "jpeg", "fps": fps, "screen": scr.label})
+    finally:
+        scr.pending -= 1  # tanpa await sampai klien terdaftar di bawah, jadi tidak ada celah
+    if error:
+        print("Error:", error)
+        if not scr.connected:
+            close_screen(app, scr)
+        await ws.send_json({"t": "error", "msg": error})
+        await ws.close()
+        return ws
     # maks 2 frame dalam perjalanan: tablet menampilkan satu sambil menerima berikutnya
     ready = asyncio.Semaphore(2)
 
@@ -789,22 +928,24 @@ async def ws_handler(request):
 
     if video:
         client = VideoClient(wifi=wifi)
-        app["video"][ws] = client
-        if not app.get("stream_task"):
-            app["stream_task"] = asyncio.create_task(stream_loop(app))
-        restart_stream_if_needed(app)
-        request_keyframe(app)
+        scr.video[ws] = client
+        if not scr.stream_task:
+            scr.stream_task = asyncio.create_task(stream_loop(app, scr))
+        restart_stream_if_needed(app, scr)
+        request_keyframe(scr)
     else:
-        app["clients"].add(ws)
+        scr.clients.add(ws)
+        if wifi:
+            scr.wifi_clients.add(ws)
 
     async def sender():
         last = 0
         try:
             while not ws.closed:
                 await ready.acquire()
-                async with cond:
-                    await cond.wait_for(lambda: STATE["seq"] != last)
-                    data, last = STATE["frame"], STATE["seq"]
+                async with scr.cond:
+                    await scr.cond.wait_for(lambda: scr.seq != last)
+                    data, last = scr.frame, scr.seq
                 await ws.send_bytes(data)
         except (ConnectionResetError, asyncio.CancelledError):
             pass
@@ -821,17 +962,18 @@ async def ws_handler(request):
             elif d.get("t") == "key":  # decoder tablet tertinggal: minta keyframe baru
                 if video:
                     client.need_key = True
-                    request_keyframe(app)
+                    request_keyframe(scr)
             elif d.get("t") != "screen":
-                await loop.run_in_executor(app["input_pool"], handle_input, app["mon"], d)
+                await loop.run_in_executor(app["input_pool"], handle_input, scr.mon, d)
     finally:
-        app["clients"].discard(ws)
-        app["video"].pop(ws, None)
-        if not app["video"] and app.get("stream_proc") and app["stream_proc"].returncode is None:
-            app["stream_proc"].terminate()  # tidak ada tablet video lagi: hentikan perekam
-        restart_stream_if_needed(app)  # mis. tablet Wi-Fi pindah ke kabel: kembali ke bitrate penuh
+        scr.clients.discard(ws)
+        scr.wifi_clients.discard(ws)
+        scr.video.pop(ws, None)
+        if not scr.video and scr.stream_proc and scr.stream_proc.returncode is None:
+            scr.stream_proc.terminate()  # tidak ada tablet video lagi di layar ini: hentikan perekamnya
+        restart_stream_if_needed(app, scr)  # mis. tablet Wi-Fi pindah ke kabel: kembali ke bitrate penuh
         task.cancel()
-        print(f"Tablet terputus: {peer}")
+        print(f"Tablet terputus: {who}")
     return ws
 
 
@@ -860,13 +1002,26 @@ async def api_pair(request):
 @local_only
 async def api_status(request):
     app = request.app
-    mon = app["mon"]
+    screens = sorted(app["screens"].values(), key=lambda s: s.number)
+    first = next((s for s in screens if s.mon), None)
+
+    def links(s):
+        return ["wifi" if c.wifi else "usb" for c in s.video.values()] + ["browser"] * len(s.clients)
+
+    def stream(s):
+        running = s.stream_proc and s.stream_proc.returncode is None
+        return {"fps": s.stream_mode[0], "mbps": s.stream_mode[1]} if running else None
+
     return web.json_response({
         **connection_info(app),
-        "clients": len(app["clients"]) + len(app["video"]),
-        "codec": "h264" if app["video"] else ("jpeg" if app["clients"] else None),
-        "display": f"{mon['width']}x{mon['height']}" if mon else None,
-        "virtual": bool(app.get("vd_proc")),
+        "clients": sum(s.connected for s in screens),
+        "codec": "h264" if any(s.video for s in screens) else ("jpeg" if any(s.clients for s in screens) else None),
+        "display": f"{first.mon['width']}x{first.mon['height']}" if first else None,
+        "virtual": any(s.vd_proc for s in screens),
+        # satu baris per perangkat: layar ke berapa, lewat apa, dan kualitas videonya
+        "screens": [{"label": s.label, "name": s.name, "connected": s.connected, "links": links(s),
+                     "display": f"{s.mon['width']}x{s.mon['height']}" if s.mon else None, "stream": stream(s)}
+                    for s in screens],
         "os": "mac" if IS_MAC else "windows" if IS_WIN else "other",
         "perms": mac_permissions(),
         "perms_at_start": app["perms_at_start"],
@@ -874,7 +1029,22 @@ async def api_status(request):
         "restarting": app.get("restarting", False),
         "login": login_item() if app_bundle() else None,
         "log": list(LOG.lines)[-15:],
+        "links": [l for s in screens for l in links(s)],
+        "stream": next((stream(s) for s in screens if stream(s)), None),
+        "version": app_version(),
     })
+
+
+def app_version():
+    bundle = app_bundle()
+    if not bundle:
+        return None
+    import plistlib
+    try:
+        with open(bundle / "Contents" / "Info.plist", "rb") as f:
+            return plistlib.load(f).get("CFBundleShortVersionString")
+    except OSError:
+        return None
 
 
 def connection_info(app):
@@ -958,9 +1128,8 @@ async def api_login(request):
 
 
 def stop(app):
-    proc = app.get("vd_proc")
-    if proc and proc.returncode is None:
-        proc.terminate()  # layar virtual ikut hilang
+    for scr in list(app["screens"].values()):
+        close_screen(app, scr)  # semua layar virtual ikut hilang
     asyncio.get_running_loop().call_later(0.3, os._exit, 0)
 
 
@@ -1042,9 +1211,9 @@ async def usb_devices_changed(app, listing, known, warned):
 
 
 async def on_startup(app):
-    app["cond"] = asyncio.Condition()
     app["setup_lock"] = asyncio.Lock()
     app["capture"] = asyncio.create_task(capture_loop(app))
+    app["reaper"] = asyncio.create_task(screen_reaper(app))
     if shutil.which("adb"):
         app["usb"] = asyncio.create_task(usb_loop(app))
     app["perm_watch"] = asyncio.create_task(permission_watch(app))
@@ -1054,12 +1223,8 @@ async def on_cleanup(app):
     app["capture"].cancel()
     if "usb" in app:
         app["usb"].cancel()
-    sp = app.get("stream_proc")
-    if sp and sp.returncode is None:
-        sp.terminate()
-    proc = app.get("vd_proc")
-    if proc and proc.returncode is None:
-        proc.terminate()  # layar virtual ikut hilang
+    for scr in list(app["screens"].values()):
+        close_screen(app, scr)  # semua layar virtual ikut hilang
 
 
 def main():
@@ -1115,9 +1280,7 @@ def main():
     app["token"] = pairing_token()
     app["perms_at_start"] = mac_permissions(prompt=True)
     app["cfg"] = cfg
-    app["mon"] = None
-    app["clients"] = set()
-    app["video"] = {}
+    app["screens"] = {}  # ID perangkat -> Screen (layar ke-2, ke-3, ...)
     app["input_pool"] = ThreadPoolExecutor(max_workers=1)
     app["connection"] = load_settings().get("connection", "wifi")
     app["usb_url"] = f"http://localhost:{cfg.port}/{code}" if shutil.which("adb") else None

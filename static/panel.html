@@ -7,160 +7,263 @@
 <style>
   :root {
     color-scheme: light dark;
-    --bg: #ffffff;
-    --panel: #f2f3f5;
-    --ink: #1d2433;
-    --muted: #5d6677;
-    --line: #dde0e6;
-    --signal: #2f6fde;
-    --warn-bg: #fff4e0;
-    --warn-ink: #7a4b00;
-    --danger: #c62f3b;
+    --bg: #f4f5f7;
+    --card: #ffffff;
+    --ink: #1c1e22;
+    --muted: #687080;
+    --faint: #9aa1ad;
+    --line: #e4e6ea;
+    --accent: #2563d9;
+    --accent-ink: #ffffff;
+    --ok: #1d9a58;
+    --ok-soft: #e3f5eb;
+    --warn: #8a5300;
+    --warn-soft: #fff4df;
+    --danger: #c4323f;
+    --shadow: 0 1px 2px rgba(20, 24, 33, 0.05), 0 2px 8px rgba(20, 24, 33, 0.04);
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --bg: #16181d;
-      --panel: #23262d;
-      --ink: #eef1f6;
-      --muted: #a3abb9;
-      --line: #343842;
-      --signal: #6f9cf0;
-      --warn-bg: #3a2c12;
-      --warn-ink: #f3c879;
-      --danger: #ef6b74;
+      --bg: #111316;
+      --card: #1a1d21;
+      --ink: #eceef2;
+      --muted: #a0a7b4;
+      --faint: #6f7684;
+      --line: #2a2e35;
+      --accent: #5b8ff0;
+      --accent-ink: #0d1117;
+      --ok: #45c97f;
+      --ok-soft: #173325;
+      --warn: #f0c36d;
+      --warn-soft: #33270f;
+      --danger: #f0717c;
+      --shadow: none;
     }
   }
   * { box-sizing: border-box; }
   body {
     margin: 0; background: var(--bg); color: var(--ink);
-    font-family: -apple-system, "Segoe UI", Roboto, sans-serif; line-height: 1.45;
+    font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased;
   }
-  main { max-width: 640px; margin: 0 auto; padding: 32px 16px 48px; }
-  h1 { margin: 0 0 4px; font-size: 1.5rem; font-weight: 650; letter-spacing: -0.01em; }
-  .sub { margin: 0 0 24px; color: var(--muted); }
-  section { background: var(--panel); border-radius: 14px; padding: 20px; margin-bottom: 14px; }
-  h2 { margin: 0 0 12px; font-size: 0.8rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); }
-  .connect { display: flex; gap: 20px; align-items: center; flex-wrap: wrap; }
-  #qr { width: 148px; height: 148px; background: #fff; border-radius: 10px; padding: 8px; flex: none; }
+  main { max-width: 860px; margin: 0 auto; padding: 28px 20px 40px; }
+  b { font-weight: 600; }
+
+  /* kepala halaman */
+  .top { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 22px; flex-wrap: wrap; }
+  .brand { display: flex; align-items: center; gap: 12px; }
+  .logo { width: 40px; height: 40px; border-radius: 10px; background: var(--accent); display: grid; place-items: center; flex: none; }
+  .logo svg { width: 24px; height: 24px; }
+  h1 { margin: 0; font-size: 1.25rem; font-weight: 650; letter-spacing: -0.01em; }
+  .tagline { margin: 0; color: var(--muted); font-size: 0.875rem; }
+  .pill {
+    display: inline-flex; align-items: center; gap: 8px; padding: 7px 14px 7px 12px; border-radius: 999px;
+    background: var(--card); border: 1px solid var(--line); font-size: 0.875rem; font-weight: 550; box-shadow: var(--shadow);
+  }
+  .pill.on { background: var(--ok-soft); border-color: transparent; color: var(--ok); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--faint); flex: none; }
+  .pill.on .dot { background: var(--ok); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ok) 22%, transparent); }
+
+  /* kartu */
+  .grid { display: grid; grid-template-columns: 1.25fr 1fr; gap: 14px; margin-bottom: 14px; }
+  @media (max-width: 720px) { .grid { grid-template-columns: 1fr; } }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 20px; box-shadow: var(--shadow); }
+  .card + .card, .grid + .card { margin-top: 14px; }
+  .grid > .card { margin-top: 0; }
+  .card-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 18px; flex-wrap: wrap; }
+  h2 { margin: 0; font-size: 0.95rem; font-weight: 600; }
+  .hint { color: var(--muted); font-size: 0.875rem; margin: 8px 0 0; }
+
+  /* pilihan Wi-Fi / Kabel */
+  .seg { display: inline-flex; background: var(--bg); border: 1px solid var(--line); border-radius: 9px; padding: 2px; }
+  .seg button {
+    border: 0; background: transparent; color: var(--muted); font: inherit; font-size: 0.85rem; font-weight: 600;
+    padding: 5px 14px; border-radius: 7px; cursor: pointer;
+  }
+  .seg button[aria-pressed="true"] { background: var(--card); color: var(--ink); box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12); }
+
+  .connect { display: flex; gap: 18px; align-items: center; }
+  @media (max-width: 460px) { .connect { flex-direction: column; align-items: flex-start; } }
+  #qr { width: 132px; height: 132px; background: #fff; border-radius: 10px; padding: 8px; border: 1px solid var(--line); flex: none; }
   #qr svg { width: 100%; height: 100%; display: block; }
-  .addr { font-size: 1.35rem; font-weight: 650; word-break: break-all; font-variant-numeric: tabular-nums; }
-  .hint { color: var(--muted); font-size: 0.92rem; margin: 6px 0 0; }
-  .status { display: flex; align-items: center; gap: 10px; font-weight: 550; }
-  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--muted); flex: none; }
-  .dot.on { background: var(--signal); }
-  .warn { background: var(--warn-bg); color: var(--warn-ink); }
+  .label-sm { font-size: 0.75rem; font-weight: 600; color: var(--faint); text-transform: uppercase; letter-spacing: 0.05em; margin: 0 0 4px; }
+  .addr {
+    font: 600 1rem/1.4 ui-monospace, "SF Mono", Menlo, monospace; word-break: break-all;
+    background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px;
+  }
+  .steps-plain { margin: 10px 0 0; padding-left: 20px; color: var(--muted); font-size: 0.875rem; }
+  .steps-plain li { margin: 4px 0; }
+
+  /* status */
+  .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 1px; margin: 0; background: var(--line); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+  .stats div { background: var(--card); padding: 12px 14px; }
+  .stats dt { font-size: 0.75rem; color: var(--faint); font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; }
+  .stats dd { margin: 3px 0 0; font-weight: 600; font-variant-numeric: tabular-nums; }
+
+  /* daftar layar (lebih dari satu perangkat) */
+  .screens { list-style: none; margin: 12px 0 0; padding: 0; border: 1px solid var(--line); border-radius: 10px; }
+  .screens li { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 10px 14px; flex-wrap: wrap; }
+  .screens li + li { border-top: 1px solid var(--line); }
+  .screens .name { font-weight: 600; }
+  .screens .meta { color: var(--muted); font-size: 0.85rem; font-variant-numeric: tabular-nums; }
+
+  /* izin macOS */
+  .warn { background: var(--warn-soft); border-color: transparent; color: var(--warn); margin-bottom: 14px; }
+  .warn h2 { color: inherit; margin-bottom: 4px; }
   .warn p { margin: 0 0 12px; }
-  .row { display: flex; gap: 8px; flex-wrap: wrap; }
-  button {
-    border: 0; border-radius: 10px; padding: 10px 16px; font: inherit; font-weight: 600; cursor: pointer;
-    background: var(--signal); color: #fff;
-  }
-  button.secondary { background: transparent; color: var(--danger); border: 1.5px solid var(--danger); }
-  button:focus-visible { outline: 3px solid var(--ink); outline-offset: 2px; }
-  pre {
-    margin: 0; font: 0.8rem/1.5 ui-monospace, Menlo, Consolas, monospace; color: var(--muted);
-    white-space: pre-wrap; word-break: break-word; max-height: 220px; overflow: auto;
-  }
-  .steps { list-style: none; margin: 0 0 12px; padding: 0; }
-  .steps li { display: flex; align-items: center; gap: 10px; padding: 8px 0; flex-wrap: wrap; }
+  .steps { list-style: none; margin: 0 0 4px; padding: 0; }
+  .steps li { display: flex; align-items: center; gap: 12px; padding: 10px 0; flex-wrap: wrap; }
   .steps li + li { border-top: 1px solid color-mix(in srgb, currentColor 18%, transparent); }
-  .mark { width: 22px; height: 22px; border-radius: 50%; flex: none; display: grid; place-items: center;
-          font-size: 0.8rem; font-weight: 700; border: 1.5px solid currentColor; }
+  .mark { width: 22px; height: 22px; border-radius: 50%; flex: none; display: grid; place-items: center; border: 1.5px solid currentColor; }
   .steps li.ok .mark { background: currentColor; }
-  .steps li.ok .mark::after { content: "✓"; color: var(--warn-bg); }
-  .steps .label { flex: 1; min-width: 180px; }
-  .steps button { padding: 7px 12px; font-size: 0.9rem; }
-  .toggle { display: flex; align-items: center; gap: 10px; cursor: pointer; }
-  .toggle input { width: 18px; height: 18px; accent-color: var(--signal); }
-  .credit { margin: 28px 0 0; color: var(--muted); font-size: 0.85rem; }
-  .seg { display: inline-flex; background: var(--bg); border: 1px solid var(--line); border-radius: 11px; padding: 3px; margin-bottom: 16px; }
-  .seg button { background: transparent; color: var(--muted); padding: 8px 18px; border-radius: 8px; font-weight: 600; }
-  .seg button[aria-pressed="true"] { background: var(--signal); color: #fff; }
-  .steps-plain { margin: 6px 0 0; padding-left: 20px; color: var(--muted); font-size: 0.92rem; }
-  .steps-plain li { margin: 3px 0; }
-  .hidden { display: none; }
+  .steps li.ok .mark::after { content: "✓"; color: var(--warn-soft); font-size: 0.75rem; font-weight: 700; }
+  .steps .label { flex: 1; min-width: 200px; }
+
+  /* tombol */
+  button.primary, button.ghost, button.danger {
+    border-radius: 8px; padding: 7px 14px; font: inherit; font-size: 0.875rem; font-weight: 600; cursor: pointer;
+  }
+  button.primary { border: 0; background: var(--accent); color: var(--accent-ink); }
+  button.ghost { background: transparent; color: var(--ink); border: 1px solid var(--line); }
+  button.danger { background: transparent; color: var(--danger); border: 1px solid color-mix(in srgb, var(--danger) 45%, transparent); }
+  button:disabled { opacity: 0.5; cursor: default; }
+  button:focus-visible, input:focus-visible + .switch, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  /* sakelar */
+  .setting { display: flex; align-items: center; justify-content: space-between; gap: 16px; cursor: pointer; }
+  .setting .text { flex: 1; }
+  .setting input { position: absolute; opacity: 0; pointer-events: none; }
+  .switch { width: 40px; height: 24px; border-radius: 12px; background: var(--line); position: relative; flex: none; transition: background 0.15s; }
+  .switch::after { content: ""; position: absolute; top: 2px; left: 2px; width: 20px; height: 20px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.25); transition: transform 0.15s; }
+  .setting input:checked + .switch { background: var(--ok); }
+  .setting input:checked + .switch::after { transform: translateX(16px); }
+
+  /* log */
+  details.card { padding: 0; }
+  summary { padding: 16px 20px; cursor: pointer; font-weight: 600; font-size: 0.95rem; list-style: none; display: flex; justify-content: space-between; }
+  summary::-webkit-details-marker { display: none; }
+  summary::after { content: "Tampilkan"; color: var(--muted); font-weight: 500; font-size: 0.85rem; }
+  details[open] summary::after { content: "Sembunyikan"; }
+  pre {
+    margin: 0; padding: 14px 20px 18px; border-top: 1px solid var(--line);
+    font: 0.78rem/1.6 ui-monospace, "SF Mono", Menlo, monospace; color: var(--muted);
+    white-space: pre-wrap; word-break: break-word; max-height: 240px; overflow: auto;
+  }
+
+  footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 22px; color: var(--faint); font-size: 0.8rem; flex-wrap: wrap; }
+  .hidden { display: none !important; }
 </style>
 </head>
 <body>
 <main>
-  <h1>Rapix</h1>
-  <p class="sub">Setiap piksel sampai ke tablet. Jadikan tablet sebagai layar kedua MacBook. Biarkan halaman ini terbuka atau tutup saja; aplikasi tetap berjalan.</p>
+  <header class="top">
+    <div class="brand">
+      <div class="logo" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="2" y="4" width="13" height="10" rx="1.5"/><path d="M6 18h5"/><rect x="17" y="7" width="5" height="11" rx="1"/>
+        </svg>
+      </div>
+      <div>
+        <h1>Rapix</h1>
+        <p class="tagline">Tablet sebagai layar kedua MacBook</p>
+      </div>
+    </div>
+    <div class="pill" id="pill" role="status" aria-live="polite"><span class="dot"></span><span id="statusText">Memuat…</span></div>
+  </header>
 
-  <section id="perm" class="warn hidden">
+  <section id="perm" class="card warn hidden">
     <h2>Persiapan pertama (sekali saja)</h2>
     <p>macOS perlu mengizinkan Rapix menampilkan layar ke tablet dan menerima sentuhan dari tablet.</p>
     <ol class="steps">
       <li id="stepScreen"><span class="mark"></span>
         <span class="label" id="screenLabel"><b>Screen Recording</b>: nyalakan Rapix</span>
-        <button data-which="screen">Buka pengaturan</button></li>
+        <button class="primary" data-which="screen">Buka pengaturan</button></li>
       <li id="stepAccess"><span class="mark"></span>
         <span class="label"><b>Accessibility</b>: nyalakan Rapix</span>
-        <button data-which="access">Buka pengaturan</button></li>
+        <button class="primary" data-which="access">Buka pengaturan</button></li>
       <li id="stepRestart"><span class="mark"></span>
         <span class="label" id="restartLabel">Rapix memuat ulang sendiri begitu keduanya menyala</span>
-        <button id="restart">Mulai ulang sekarang</button></li>
+        <button class="ghost" id="restart">Mulai ulang sekarang</button></li>
     </ol>
-    <p class="hint">Sakelar sudah menyala tapi masih belum tercentang? Pilih Rapix di daftar itu, hapus dengan tombol <b>−</b>, lalu tambahkan lagi dengan <b>+</b> (Applications → Rapix). Ini terjadi setelah Rapix diperbarui.</p>
+    <p class="hint" style="color: inherit; opacity: .85">Sakelar sudah menyala tapi belum tercentang? Pilih Rapix di daftar itu, hapus dengan <b>−</b>, lalu tambahkan lagi dengan <b>+</b> (Applications → Rapix). Ini bisa terjadi setelah Rapix diperbarui.</p>
   </section>
 
-  <section>
-    <h2>Sambungkan tablet</h2>
-    <div class="seg" role="group" aria-label="Cara menyambung">
-      <button data-mode="wifi" aria-pressed="false">Wi-Fi</button>
-      <button data-mode="cable" aria-pressed="false">Kabel USB</button>
-    </div>
-    <div class="connect" id="connectBox">
-      <div id="qr" aria-label="Kode QR alamat tablet"></div>
-      <div>
-        <div class="addr" id="url">…</div>
-        <p class="hint" id="connectHint"></p>
+  <div class="grid">
+    <section class="card">
+      <div class="card-head">
+        <h2>Sambungkan tablet</h2>
+        <div class="seg" role="group" aria-label="Cara menyambung">
+          <button data-mode="wifi" aria-pressed="false">Wi-Fi</button>
+          <button data-mode="cable" aria-pressed="false">Kabel USB</button>
+        </div>
       </div>
-    </div>
-    <div id="cableHelp" class="hidden">
-      <p class="hint"><b>Menunggu kabel USB…</b> Alamat dan QR muncul di sini begitu tablet tersambung.</p>
-      <ol class="steps-plain">
-        <li>Colok tablet ke MacBook dengan kabel data.</li>
-        <li>Di tablet: <b>Settings → Tethering</b> (Berbagi jaringan), nyalakan <b>USB tethering</b>.</li>
-        <li>Atau, untuk Android dengan USB debugging aktif: cukup colok kabel, browser tablet terbuka sendiri.</li>
-      </ol>
-    </div>
-  </section>
+      <div class="connect" id="connectBox">
+        <div id="qr" aria-label="Kode QR alamat tablet"></div>
+        <div style="min-width: 0; flex: 1">
+          <p class="label-sm">Alamat untuk browser tablet</p>
+          <div class="addr" id="url">…</div>
+          <p class="hint" id="connectHint"></p>
+        </div>
+      </div>
+      <div id="cableHelp" class="hidden">
+        <p class="hint" style="margin-top: 0"><b>Menunggu kabel USB…</b></p>
+        <ol class="steps-plain">
+          <li><b>Aplikasi Rapix tablet</b> (disarankan): aktifkan USB debugging, colok kabel data. Aplikasi terbuka sendiri.</li>
+          <li><b>Browser</b>: di tablet nyalakan <b>USB tethering</b>; alamat dan QR muncul di sini.</li>
+        </ol>
+      </div>
+    </section>
 
-  <section>
-    <h2>Status</h2>
-    <div class="status"><span class="dot" id="dot"></span><span id="statusText">Memuat…</span></div>
-    <p class="hint" id="modeText"></p>
-  </section>
-
-  <section id="prefs" class="hidden">
-    <h2>Pengaturan</h2>
-    <label class="toggle"><input type="checkbox" id="login"> Buka Rapix otomatis saat Mac menyala</label>
-    <p class="hint">Rapix berjalan diam-diam di latar belakang dan baru bekerja saat tablet tersambung. Panel ini bisa dibuka lagi lewat ikon Rapix di menu bar (pojok kanan atas layar) atau dengan membuka Rapix dari Launchpad.</p>
-  </section>
-
-  <section>
-    <h2>Log</h2>
-    <pre id="log"></pre>
-  </section>
-
-  <div class="row">
-    <button class="secondary" id="quit">Berhenti</button>
+    <section class="card">
+      <div class="card-head"><h2>Status</h2></div>
+      <dl class="stats">
+        <div><dt>Tablet</dt><dd id="stTablet">—</dd></div>
+        <div><dt>Koneksi</dt><dd id="stLink">—</dd></div>
+        <div><dt id="stVideoLabel">Video</dt><dd id="stVideo">—</dd></div>
+        <div><dt>Layar</dt><dd id="stDisplay">—</dd></div>
+      </dl>
+      <ul class="screens hidden" id="screens" aria-label="Layar per perangkat"></ul>
+      <p class="hint" id="modeText"></p>
+    </section>
   </div>
-  <p class="credit">Rapix · dibuat oleh RAP</p>
+
+  <section id="prefs" class="card hidden">
+    <label class="setting">
+      <span class="text">
+        <b>Buka otomatis saat Mac menyala</b>
+        <span class="hint" style="display: block; margin-top: 2px">Rapix berjalan diam-diam dan baru bekerja saat tablet tersambung. Panel ini bisa dibuka lagi lewat ikon Rapix di menu bar.</span>
+      </span>
+      <input type="checkbox" id="login"><span class="switch" aria-hidden="true"></span>
+    </label>
+  </section>
+
+  <details class="card">
+    <summary>Log teknis</summary>
+    <pre id="log"></pre>
+  </details>
+
+  <footer>
+    <span id="credit">Rapix · dibuat oleh RAP</span>
+    <button class="danger" id="quit">Hentikan Rapix</button>
+  </footer>
 </main>
 
 <script>
 const $ = (id) => document.getElementById(id);
 let shownQr = null, stopped = false, restarting = false;
 
+function setPill(text, on) {
+  $('statusText').textContent = text;
+  $('pill').classList.toggle('on', on);
+}
+
+const LINK = { usb: 'Kabel USB', wifi: 'Wi-Fi', browser: 'Browser' };
+
 async function refresh() {
   if (stopped) return;
   let s;
   try { s = await (await fetch('/api/status', { cache: 'no-store' })).json(); }
-  catch {
-    $('statusText').textContent = restarting ? 'Memuat ulang…' : 'Rapix tidak berjalan.';
-    $('dot').classList.remove('on'); return;
-  }
+  catch { setPill(restarting ? 'Memuat ulang…' : 'Rapix tidak berjalan', false); return; }
   restarting = s.restarting;
 
   for (const b of document.querySelectorAll('[data-mode]')) b.setAttribute('aria-pressed', b.dataset.mode === s.connection);
@@ -171,17 +274,43 @@ async function refresh() {
     $('url').textContent = s.target_url;
     if (shownQr !== s.target_url) { $('qr').innerHTML = s.qr; shownQr = s.target_url; }
     $('connectHint').innerHTML = !cable
-      ? 'Scan QR atau ketik alamat ini di browser tablet (Wi-Fi yang sama), lalu ketuk <b>Mulai</b>.'
+      ? 'Aplikasi Rapix di tablet tersambung sendiri lewat Wi-Fi yang sama. Untuk browser: scan QR, lalu ketuk <b>Mulai</b>.'
       : (s.wired_urls || []).length
-        ? 'Tersambung lewat kabel USB (USB tethering). Buka alamat ini di browser tablet, lalu ketuk <b>Mulai</b>.'
-        : 'Tablet Android tersambung lewat kabel (USB debugging). Browser tablet terbuka sendiri; ketuk <b>Mulai</b>.';
+        ? 'Tersambung lewat USB tethering. Buka alamat ini di browser tablet, lalu ketuk <b>Mulai</b>.'
+        : 'Tablet tersambung lewat kabel (USB debugging). Aplikasi Rapix di tablet terbuka sendiri.';
   }
 
-  $('dot').classList.toggle('on', s.clients > 0);
-  $('statusText').textContent = s.clients > 0 ? `Tablet tersambung (${s.clients})` : 'Menunggu tablet…';
-  $('modeText').textContent = !s.display ? ''
-    : s.virtual ? `Layar kedua ${s.display} aktif. Atur posisinya di System Settings → Displays → Arrange.`
-    : `Mode cermin: tablet menampilkan layar ${s.display}.`;
+  // status
+  const links = s.links || [];
+  const linkText = [...new Set(links.map((l) => LINK[l] || l))].join(', ');
+  setPill(s.restarting ? 'Memuat ulang…'
+    : s.clients > 0 ? `Tersambung · ${linkText || 'tablet'}` : 'Menunggu tablet', !s.restarting && s.clients > 0);
+  $('stTablet').textContent = s.clients > 0 ? `${s.clients} tersambung` : 'Belum ada';
+  $('stLink').textContent = linkText || '—';
+  $('stVideoLabel').textContent = s.stream ? 'Video H.264' : 'Video';
+  $('stVideo').textContent = s.stream ? `${s.stream.fps} fps · ${s.stream.mbps} Mbps`
+    : s.codec === 'jpeg' ? 'JPEG' : '—';
+  // yang dihitung hanya layar yang perangkatnya sedang tersambung
+  const screens = (s.screens || []).filter((sc) => sc.connected);
+  $('stDisplay').textContent = screens.length > 1 ? `${screens.length} layar`
+    : !s.display ? '—' : s.virtual ? s.display : `${s.display} (cermin)`;
+  // lebih dari satu perangkat: tiap perangkat punya layarnya sendiri (layar ke-2, ke-3, ...)
+  $('screens').classList.toggle('hidden', screens.length < 2);
+  $('screens').replaceChildren(...screens.map((sc) => {
+    const li = document.createElement('li');
+    const name = document.createElement('span');
+    name.className = 'name';
+    name.textContent = sc.label;
+    const meta = document.createElement('span');
+    meta.className = 'meta';
+    const via = [...new Set((sc.links || []).map((l) => LINK[l] || l))].join(', ');
+    meta.textContent = [via, sc.stream ? `${sc.stream.fps} fps` : '', sc.display || ''].filter(Boolean).join(' · ');
+    li.append(name, meta);
+    return li;
+  }));
+  $('modeText').textContent = !s.display ? 'Layar dibuat otomatis saat tablet tersambung. Perangkat berikutnya jadi layar ke-3, dan seterusnya.'
+    : s.virtual ? 'Perangkat lain yang tersambung menjadi layar berikutnya. Atur posisinya di System Settings → Displays → Arrange.'
+    : 'Mode cermin: tablet menampilkan salinan layar utama.';
 
   // bagian persiapan hanya tampil selama ada izin yang benar-benar belum aktif
   const p = s.perms || {};
@@ -199,10 +328,10 @@ async function refresh() {
   $('restartLabel').textContent = s.restarting ? 'Izin aktif. Rapix sedang dimuat ulang…'
     : ready ? 'Izin aktif. Rapix akan dimuat ulang otomatis…'
     : 'Rapix memuat ulang sendiri begitu keduanya menyala';
-  if (s.restarting) $('statusText').textContent = 'Memuat ulang…';
 
   $('prefs').classList.toggle('hidden', s.login === null || s.login === undefined);
   if (document.activeElement !== $('login')) $('login').checked = !!s.login;
+  $('credit').textContent = `Rapix${s.version ? ' ' + s.version : ''} · dibuat oleh RAP`;
 
   $('log').textContent = (s.log || []).join('\n');
 }
@@ -219,7 +348,7 @@ for (const b of document.querySelectorAll('[data-which]')) {
 $('restart').addEventListener('click', async () => {
   $('restart').disabled = true;
   restarting = true;
-  $('statusText').textContent = 'Memulai ulang…';
+  setPill('Memulai ulang…', false);
   try { await fetch('/api/restart', { method: 'POST' }); } catch {}
   setTimeout(() => { $('restart').disabled = false; }, 6000);
 });
@@ -230,8 +359,7 @@ $('quit').addEventListener('click', async () => {
   if (!confirm('Hentikan Rapix? Layar tablet akan dilepas.')) return;
   stopped = true;
   try { await fetch('/api/quit', { method: 'POST' }); } catch {}
-  $('statusText').textContent = 'Rapix sudah berhenti. Halaman ini boleh ditutup.';
-  $('dot').classList.remove('on');
+  setPill('Rapix sudah berhenti', false);
 });
 
 refresh();

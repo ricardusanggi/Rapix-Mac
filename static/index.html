@@ -73,7 +73,7 @@ const dot = document.getElementById('dot');
 const statusText = document.getElementById('statusText');
 
 const ctx = img.getContext('2d');
-let ws, remoteW = 16, remoteH = 9, started = false, rx = 0, shown = 0;
+let ws, remoteW = 16, remoteH = 9, started = false, rx = 0, shown = 0, refusal = null;
 
 // video H.264 lewat WebCodecs (decoder hardware tablet); hanya di konteks aman, mis. http://localhost lewat USB
 const canVideo = typeof VideoDecoder !== 'undefined' && isSecureContext && !location.search.includes('jpeg');
@@ -123,6 +123,19 @@ addEventListener('resize', layout);
 function send(o) { if (ws && ws.readyState === 1) ws.send(JSON.stringify(o)); }
 function ack() { send({ t: 'ack' }); }
 
+// ID tetap untuk perangkat ini: Mac memberi setiap perangkat layarnya sendiri (layar ke-2, ke-3, ...).
+// Jika penyimpanan browser diblokir, Mac mengenali perangkat dari alamat IP-nya.
+function deviceId() {
+  try {
+    let id = localStorage.getItem('rapix-device');
+    if (!id) {
+      id = 'web-' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+      localStorage.setItem('rapix-device', id);
+    }
+    return id;
+  } catch { return ''; }
+}
+
 function connect() {
   ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws?k=' + encodeURIComponent(location.pathname.split('/')[1] || ''));
   ws.binaryType = 'arraybuffer';
@@ -130,7 +143,8 @@ function connect() {
     // kirim ukuran layar tablet supaya MacBook membuat monitor dengan ukuran yang pas
     const landscape = innerWidth >= innerHeight;
     const a = Math.max(screen.width, screen.height), b = Math.min(screen.width, screen.height);
-    ws.send(JSON.stringify({ t: 'screen', w: landscape ? a : b, h: landscape ? b : a, dpr: devicePixelRatio, h264: canVideo }));
+    ws.send(JSON.stringify({ t: 'screen', w: landscape ? a : b, h: landscape ? b : a, dpr: devicePixelRatio,
+                             h264: canVideo, device: deviceId() }));
     setStatus('Terhubung', true);
     if (started) panel.classList.add('hidden');
   };
@@ -142,7 +156,8 @@ function connect() {
         codec = d.codec || 'jpeg';
         if (codec === 'h264') startDecoder();
       }
-      if (d.t === 'error') { started = false; panel.classList.remove('hidden'); setStatus('Gagal: ' + d.msg, false); }
+      if (d.t === 'hello') refusal = null;
+      if (d.t === 'error') { refusal = d.msg; started = false; panel.classList.remove('hidden'); setStatus(d.msg, false); }
       return;
     }
     if (codec === 'h264') { onVideo(e.data); return; }
@@ -157,7 +172,11 @@ function connect() {
       bmp.close();
     }).catch(() => {}).finally(ack);
   };
-  ws.onclose = () => { setStatus('Terputus. Menyambung ulang…', false); setTimeout(connect, 1500); };
+  // ditolak Mac (mis. layar Wi-Fi sedang dipakai perangkat lain): tampilkan alasannya dan coba lagi lebih jarang
+  ws.onclose = () => {
+    setStatus(refusal || 'Terputus. Menyambung ulang…', false);
+    setTimeout(connect, refusal ? 5000 : 1500);
+  };
 }
 
 startBtn.addEventListener('click', () => {
