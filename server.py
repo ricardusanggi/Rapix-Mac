@@ -542,6 +542,110 @@ def handle_input(mon, d):
             pyautogui.doubleClick(x, y)
     elif t == "scroll":
         pyautogui.scroll(int(d.get("dy", 0)))
+    elif IS_MAC and t == "kb":
+        key_event(d)
+    elif IS_MAC and t == "text":
+        type_text(d.get("s", ""))
+    elif IS_MAC and t == "pen":
+        pen_event(mon, d)
+
+
+# ---------- keyboard & pen tablet (aplikasi Android) ----------
+# kode tombol Android (KeyEvent.KEYCODE_*) -> kode tombol virtual Mac (tata letak US/ABC)
+ANDROID_TO_MAC = {
+    **dict(zip(range(29, 55), [0, 11, 8, 2, 14, 3, 5, 4, 34, 38, 40, 37, 46, 45, 31, 35, 12, 15, 1, 17, 32, 9, 13, 7, 16, 6])),  # A-Z
+    **dict(zip(range(7, 17), [29, 18, 19, 20, 21, 23, 22, 26, 28, 25])),  # 0-9
+    66: 36, 160: 76, 67: 51, 112: 117, 61: 48, 62: 49, 111: 53, 115: 57,  # enter, numpad enter, backspace, del, tab, spasi, esc, caps
+    19: 126, 20: 125, 21: 123, 22: 124, 122: 115, 123: 119, 92: 116, 93: 121,  # panah, home, end, page up/down
+    68: 50, 69: 27, 70: 24, 71: 33, 72: 30, 73: 42, 74: 41, 75: 39, 76: 44, 55: 43, 56: 47,  # ` - = [ ] \ ; ' / , .
+    **dict(zip(range(131, 143), [122, 120, 99, 118, 96, 97, 98, 100, 101, 109, 103, 111])),  # F1-F12
+    # tombol modifier ikut dikirim supaya tahan Cmd/Shift (mis. Cmd+klik) juga bekerja
+    113: 55, 114: 55, 59: 56, 60: 56, 57: 58, 58: 58, 117: 59, 118: 59,
+}
+# Ctrl di keyboard tablet = Cmd di Mac (Ctrl+C jadi salin), Alt = Option, tombol Windows/Huawei = Control
+META_TO_MAC = ((0x1000, 0x100000), (0x1, 0x20000), (0x2, 0x80000), (0x10000, 0x40000))
+
+
+def mac_flags(meta):
+    flags = 0
+    for android, mac in META_TO_MAC:
+        if meta & android:
+            flags |= mac
+    return flags
+
+
+def key_event(d):
+    import Quartz
+    code = ANDROID_TO_MAC.get(int(d.get("code", -1)))
+    if code is None:  # tombol tanpa padanan (mis. huruf non-US): ketik karakternya saja
+        if d.get("down") and d.get("ch"):
+            type_text(d["ch"])
+        return
+    e = Quartz.CGEventCreateKeyboardEvent(None, code, bool(d.get("down")))
+    Quartz.CGEventSetFlags(e, mac_flags(int(d.get("meta", 0))))
+    Quartz.CGEventPost(Quartz.kCGHIDEventTap, e)
+
+
+def type_text(s):
+    """Teks dari keyboard layar tablet: dikirim per karakter sebagai Unicode, tidak bergantung tata letak."""
+    import Quartz
+    for ch in s:
+        for down in (True, False):
+            e = Quartz.CGEventCreateKeyboardEvent(None, 0, down)
+            Quartz.CGEventKeyboardSetUnicodeString(e, len(ch.encode("utf-16-le")) // 2, ch)
+            Quartz.CGEventPost(Quartz.kCGHIDEventTap, e)
+
+
+_pen = {"near": False, "down": False}
+
+
+def pen_event(mon, d):
+    """Pen tablet sebagai pena gambar Mac: tekanan dan kemiringan dibaca aplikasi seperti Photoshop/Krita."""
+    import Quartz
+    a = d.get("a")
+    x = mon["left"] + float(d.get("x", 0)) * (mon["width"] - 1)
+    y = mon["top"] + float(d.get("y", 0)) * (mon["height"] - 1)
+    pressure = max(0.0, min(1.0, float(d.get("p", 0)))) if a in ("down", "move") else 0.0
+
+    if a == "leave":
+        if _pen["near"]:
+            proximity(False)
+        return
+    if not _pen["near"]:
+        proximity(True)
+
+    if a == "down":
+        kind, _pen["down"] = Quartz.kCGEventLeftMouseDown, True
+    elif a == "up":
+        kind, _pen["down"] = Quartz.kCGEventLeftMouseUp, False
+    elif _pen["down"]:
+        kind = Quartz.kCGEventLeftMouseDragged
+    else:
+        kind = Quartz.kCGEventMouseMoved  # pen melayang di atas layar: gerakkan kursor saja
+
+    e = Quartz.CGEventCreateMouseEvent(None, kind, (x, y), Quartz.kCGMouseButtonLeft)
+    Quartz.CGEventSetIntegerValueField(e, Quartz.kCGMouseEventSubtype, Quartz.kCGEventMouseSubtypeTabletPoint)
+    Quartz.CGEventSetIntegerValueField(e, Quartz.kCGMouseEventClickState, 1)
+    Quartz.CGEventSetDoubleValueField(e, Quartz.kCGMouseEventPressure, pressure)
+    Quartz.CGEventSetDoubleValueField(e, Quartz.kCGTabletEventPointPressure, pressure)
+    Quartz.CGEventSetDoubleValueField(e, Quartz.kCGTabletEventTiltX, float(d.get("tx", 0)))
+    Quartz.CGEventSetDoubleValueField(e, Quartz.kCGTabletEventTiltY, float(d.get("ty", 0)))
+    Quartz.CGEventSetIntegerValueField(e, Quartz.kCGTabletEventPointX, int(x))
+    Quartz.CGEventSetIntegerValueField(e, Quartz.kCGTabletEventPointY, int(y))
+    Quartz.CGEventPost(Quartz.kCGHIDEventTap, e)
+
+
+def proximity(enter):
+    """Beri tahu macOS bahwa pena mendekat/menjauh, supaya aplikasi gambar mengenalinya sebagai pena."""
+    import Quartz
+    e = Quartz.CGEventCreate(None)
+    Quartz.CGEventSetType(e, Quartz.kCGEventTabletProximity)
+    Quartz.CGEventSetIntegerValueField(e, Quartz.kCGTabletProximityEventEnterProximity, 1 if enter else 0)
+    Quartz.CGEventSetIntegerValueField(e, Quartz.kCGTabletProximityEventPointerType, 1)  # 1 = pena
+    Quartz.CGEventSetIntegerValueField(e, Quartz.kCGTabletProximityEventDeviceID, 1)
+    Quartz.CGEventSetIntegerValueField(e, Quartz.kCGTabletProximityEventCapabilityMask, 0x0C47)  # posisi, tekanan, tilt
+    Quartz.CGEventPost(Quartz.kCGHIDEventTap, e)
+    _pen["near"] = enter
 
 
 # ---------- web ----------

@@ -11,6 +11,7 @@ import android.util.Log;
 import android.view.Choreographer;
 import android.view.Display;
 import android.view.Gravity;
+import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.Surface;
 import android.view.SurfaceHolder;
@@ -19,6 +20,7 @@ import android.view.View;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
 import android.view.WindowManager;
+import android.view.inputmethod.InputMethodManager;
 import android.widget.FrameLayout;
 import android.widget.TextView;
 
@@ -44,7 +46,7 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     private static final int PORT = 8765;
     private static final int TARGET_HZ = 90;
 
-    private SurfaceView surfaceView;
+    private InputSurface surfaceView;
     private TextView status;
     private final Handler ui = new Handler(Looper.getMainLooper());
     private final ExecutorService sender = Executors.newSingleThreadExecutor();
@@ -63,9 +65,13 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         density = getResources().getDisplayMetrics().density;
 
-        surfaceView = new SurfaceView(this);
+        surfaceView = new InputSurface(this, new InputSurface.Keys() {
+            @Override public void text(String s) { send(json("t", "text", "s", s)); }
+            @Override public void key(int code) { tapKey(code); }
+        });
         surfaceView.getHolder().addCallback(this);
         surfaceView.setOnTouchListener((v, e) -> { onTouch(e); return true; });
+        surfaceView.setOnGenericMotionListener((v, e) -> onHover(e));
 
         status = new TextView(this);
         status.setTextColor(Color.WHITE);
@@ -261,6 +267,104 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
         });
     }
 
+    /** Pesan JSON dari pasangan kunci-nilai: json("t", "kb", "code", 29). */
+    private static String json(Object... kv) {
+        JSONObject o = new JSONObject();
+        try {
+            for (int i = 0; i + 1 < kv.length; i += 2) o.put((String) kv[i], kv[i + 1]);
+        } catch (JSONException ignored) { }
+        return o.toString();
+    }
+
+    // ---------- keyboard tablet -> keyboard Mac ----------
+    /** Keyboard fisik (keyboard MatePad / Bluetooth): setiap tombol diteruskan, termasuk Ctrl+C dan kawan-kawan. */
+    @Override
+    public boolean dispatchKeyEvent(KeyEvent e) {
+        int code = e.getKeyCode();
+        boolean system = code == KeyEvent.KEYCODE_BACK || code == KeyEvent.KEYCODE_VOLUME_UP
+                || code == KeyEvent.KEYCODE_VOLUME_DOWN || code == KeyEvent.KEYCODE_POWER;
+        if (system || ws == null) return super.dispatchKeyEvent(e);
+        if (e.getAction() == KeyEvent.ACTION_MULTIPLE) {  // teks gabungan dari sebagian keyboard
+            if (e.getCharacters() != null) send(json("t", "text", "s", e.getCharacters()));
+            return true;
+        }
+        int ch = e.getUnicodeChar();
+        send(json("t", "kb", "code", code, "down", e.getAction() == KeyEvent.ACTION_DOWN,
+                "meta", e.getMetaState(), "ch", ch > 0 ? String.valueOf((char) ch) : ""));
+        return true;
+    }
+
+    private void tapKey(int code) {
+        send(json("t", "kb", "code", code, "down", true, "meta", 0));
+        send(json("t", "kb", "code", code, "down", false, "meta", 0));
+    }
+
+    /** Tiga jari mengetuk layar: munculkan / sembunyikan keyboard layar tablet. */
+    private void toggleSoftKeyboard() {
+        InputMethodManager imm = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+        surfaceView.requestFocus();
+        softKeyboard = !softKeyboard;
+        if (softKeyboard) imm.showSoftInput(surfaceView, InputMethodManager.SHOW_FORCED);
+        else imm.hideSoftInputFromWindow(surfaceView.getWindowToken(), 0);
+    }
+
+    private boolean softKeyboard;
+
+    // ---------- pen tablet -> pena gambar Mac (tekanan, kemiringan, melayang) ----------
+    private static boolean isPen(MotionEvent e) {
+        int tool = e.getToolType(0);
+        return tool == MotionEvent.TOOL_TYPE_STYLUS || tool == MotionEvent.TOOL_TYPE_ERASER;
+    }
+
+    private void sendPen(String action, MotionEvent e) {
+        float nx = Math.min(1, Math.max(0, e.getX() / surfaceView.getWidth()));
+        float ny = Math.min(1, Math.max(0, e.getY() / surfaceView.getHeight()));
+        // kemiringan Android (sudut dari tegak + arah) -> komponen X/Y -1..1 seperti pena Mac
+        double tilt = e.getAxisValue(MotionEvent.AXIS_TILT), dir = e.getOrientation();
+        float tx = (float) (Math.sin(tilt) * Math.sin(dir)), ty = (float) (-Math.sin(tilt) * Math.cos(dir));
+        send(json("t", "pen", "a", action, "x", nx, "y", ny, "p", e.getPressure(), "tx", tx, "ty", ty));
+    }
+
+    private final Runnable penLeave = () -> send(json("t", "pen", "a", "leave"));
+
+    private void onPen(MotionEvent e) {
+        ui.removeCallbacks(penLeave);
+        switch (e.getActionMasked()) {
+            case MotionEvent.ACTION_DOWN:
+                // tombol samping pena ditekan saat menyentuh = klik kanan
+                if ((e.getButtonState() & MotionEvent.BUTTON_STYLUS_PRIMARY) != 0) sendPoint("rclick", e.getX(), e.getY());
+                else sendPen("down", e);
+                penButton = (e.getButtonState() & MotionEvent.BUTTON_STYLUS_PRIMARY) != 0;
+                break;
+            case MotionEvent.ACTION_MOVE:
+                if (!penButton) sendPen("move", e);
+                break;
+            case MotionEvent.ACTION_UP:
+            case MotionEvent.ACTION_CANCEL:
+                if (!penButton) sendPen("up", e);
+                penButton = false;
+                break;
+        }
+    }
+
+    private boolean penButton;
+
+    private boolean onHover(MotionEvent e) {
+        if (!isPen(e)) return false;
+        switch (e.getActionMasked()) {
+            case MotionEvent.ACTION_HOVER_ENTER:
+            case MotionEvent.ACTION_HOVER_MOVE:
+                ui.removeCallbacks(penLeave);
+                sendPen("hover", e);
+                return true;
+            case MotionEvent.ACTION_HOVER_EXIT:
+                // pena menyentuh layar juga memicu HOVER_EXIT; tunggu sebentar sebelum menganggapnya pergi
+                ui.postDelayed(penLeave, 400);
+                return true;
+        }
+        return false;
+    }
+
     // ---------- sentuhan -> mouse (sama seperti halaman browser) ----------
     private static final int PENDING = 1, DRAG = 2, SCROLL = 3, DONE = 4;
     private int mode;
@@ -283,8 +387,15 @@ public class MainActivity extends Activity implements SurfaceHolder.Callback {
     }
 
     private void onTouch(MotionEvent e) {
+        if (isPen(e)) { onPen(e); return; }
         float x = e.getX(), y = e.getY();
         boolean finger = e.getToolType(0) == MotionEvent.TOOL_TYPE_FINGER;
+        if (e.getActionMasked() == MotionEvent.ACTION_POINTER_DOWN && e.getPointerCount() == 3) {
+            ui.removeCallbacks(longPress);
+            mode = DONE;  // ketukan tiga jari bukan klik/gulir
+            toggleSoftKeyboard();
+            return;
+        }
         switch (e.getActionMasked()) {
             case MotionEvent.ACTION_DOWN:
                 startX = x; startY = y;
